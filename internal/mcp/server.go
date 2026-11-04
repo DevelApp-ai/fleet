@@ -44,7 +44,7 @@ func New(f *fleet.Fleet, w *wall.Wall) *Server {
 	s.Fill = func() (int, int, bool) { return supervisor.CurrentFill(f.Home, f.T, fleet.Session+":main") }
 	s.Reset = func() error {
 		// tmux runs the reset, so it survives this MCP server being killed with the supervisor.
-		_, err := f.T.Run("run-shell", "-b", "sleep 2; "+tools.Quote(f.Exe)+" supervisor reset --handoff")
+		_, err := f.T.Run("run-shell", "-b", "sleep 2; "+tools.Quote(f.Exe)+" supervisor reset --handoff >/dev/null 2>&1")
 		return err
 	}
 	return s

@@ -17,9 +17,11 @@ import (
 
 // confirmResetArgs is the tmux command behind M-R and the overview's R.
 func confirmResetArgs(exe string) []string {
+	// Output is discarded: run-shell would show it in view mode over the pane;
+	// the result reaches the user via display-message.
 	// tmux parses the run-shell argument again: double-quote it for tmux and
 	// shell-quote the exe for sh.
-	sh := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(tools.Quote(exe) + " supervisor reset")
+	sh := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(tools.Quote(exe) + " supervisor reset >/dev/null 2>&1")
 	return []string{"confirm-before", "-p", "reset supervisor? (y/n)", `run-shell -b "` + sh + `"`}
 }
 
