@@ -10,25 +10,39 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/keys"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/supervisor"
 	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
-// supervisorCmd returns the shell command and dir for the supervisor pane.
-func supervisorCmd(f *fleet.Fleet) (string, string, []string, error) {
-	prof := os.Getenv("FLEET_SUPERVISOR_PROFILE")
+// supLaunch is how to start the supervisor pane.
+type supLaunch struct {
+	Cmd, Dir string
+	Env      []string
+	ID       string // session id, "" if the profile can't set one
+	Profile  string
+}
+
+// supervisorCmd builds the supervisor command for profile ("": the
+// FLEET_SUPERVISOR_PROFILE env, else copilot). A non-empty boot prompt is
+// passed with -i to copilot-pattern profiles (used by supervisor reset).
+func supervisorCmd(f *fleet.Fleet, prof, boot string) (supLaunch, error) {
+	if prof == "" {
+		prof = os.Getenv("FLEET_SUPERVISOR_PROFILE")
+	}
 	if prof == "" {
 		prof = "copilot"
 	}
 	p, ok := f.Profiles[prof]
 	if !ok {
-		return "", "", nil, fmt.Errorf("supervisor profile %q not found", prof)
+		return supLaunch{}, fmt.Errorf("supervisor profile %q not found", prof)
 	}
 	dir := os.Getenv("FLEET_SUPERVISOR_DIR")
 	if dir == "" {
@@ -40,8 +54,11 @@ func supervisorCmd(f *fleet.Fleet) (string, string, []string, error) {
 	}
 	argv := p.Argv(tools.Vars{Fleet: f.Exe, Name: "supervisor", ID: id}, false)
 	argv = append(argv, supervisorMCPArgs(p)...)
+	if boot != "" && p.Patterns == "copilot" {
+		argv = append(argv, "-i", boot)
+	}
 	logx.For("up").Info("supervisor", "profile", prof, "dir", dir, "argv", argv)
-	return tools.ShellCommand(argv), dir, p.EnvList(), nil
+	return supLaunch{Cmd: tools.ShellCommand(argv), Dir: dir, Env: p.EnvList(), ID: id, Profile: prof}, nil
 }
 
 // supervisorMCPArgs makes a copilot supervisor lean: only the fleet MCP tools
@@ -100,7 +117,7 @@ func cmdUp(f *fleet.Fleet, args []string) error {
 	noAttach := len(args) > 0 && args[0] == "--no-attach"
 	target := fleet.Session + ":main"
 	if _, err := t.Run("has-session", "-t", "="+fleet.Session); err != nil || !windowExists(f, "main") {
-		cmd, dir, env, err := supervisorCmd(f)
+		sl, err := supervisorCmd(f, "", "")
 		if err != nil {
 			return err
 		}
@@ -110,16 +127,19 @@ func cmdUp(f *fleet.Fleet, args []string) error {
 		} else {
 			a = []string{"new-session", "-d", "-s", fleet.Session, "-n", "main", "-x", "300", "-y", "80"}
 		}
-		a = append(a, "-P", "-F", "#{pane_id}", "-c", dir)
-		for _, e := range env {
+		a = append(a, "-P", "-F", "#{pane_id}", "-c", sl.Dir)
+		for _, e := range sl.Env {
 			a = append(a, "-e", e)
 		}
-		sup, err := t.Run(append(a, cmd)...)
+		sup, err := t.Run(append(a, sl.Cmd)...)
 		if err != nil {
 			return err
 		}
 		t.SetPaneOption(sup, "@role", "sup")
 		t.SetPaneOption(sup, "remain-on-exit", "on")
+		if err := supervisor.Save(f.Home, supervisor.Session{SessionID: sl.ID, Profile: sl.Profile, PaneID: sup, Started: time.Now(), Generation: 1}); err != nil {
+			log.Error("save supervisor session", "err", err)
+		}
 		log.Info("created main window", "sup", sup)
 	}
 	ensureOverview(f, target)
@@ -200,7 +220,7 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		{"set-option", "-g", "pane-border-lines", "heavy"},
 		{"set-option", "-g", "pane-active-border-style", "fg=#58a6ff"},
 		{"set-option", "-g", "pane-border-format",
-			" #{?#{==:#{@role},sup},#[fg=#a371f7]#[bold]supervisor#[default],#{?#{==:#{@role},ov},#[bold]overview#[default],#[fg=#{?@fleet_color,#{@fleet_color},default}]#{@fleet_glyph} #{@fleet_agent} #{@fleet_status}#[default]}} "},
+			" #{?#{==:#{@role},sup},#[fg=#a371f7]#[bold]supervisor#[default]#{?@fleet_ctx,#[fg=#{@fleet_ctx_color}] · ctx #{@fleet_ctx}#[default],},#{?#{==:#{@role},ov},#[bold]overview#[default],#[fg=#{?@fleet_color,#{@fleet_color},default}]#{@fleet_glyph} #{@fleet_agent} #{@fleet_status}#[default]}} "},
 		{"set-option", "-g", "window-style", "fg=#a8a8a8"},
 		{"set-option", "-g", "window-active-style", "fg=default"},
 		{"set-option", "-g", "status-left", "#[bold] fleet #[default]"},
@@ -221,6 +241,7 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		{"bind-key", "-n", keys.HelpTmuxKey, "display-popup", "-E", "-b", "rounded",
 			"-w", strconv.Itoa(keys.PopupWidth()), "-h", strconv.Itoa(keys.PopupHeight()),
 			"-T", " fleet keys · any key closes ", exe + " keys --popup"},
+		append([]string{"bind-key", "-n", "M-R"}, confirmResetArgs(f.Exe)...),
 	}
 	for _, p := range []string{"1", "2", "4", "6", "9", "m"} {
 		set = append(set, []string{"bind-key", "-n", "M-" + p, wallCmd("preset " + p)})

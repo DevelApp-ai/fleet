@@ -55,7 +55,7 @@ func TestRoundTrip(t *testing.T) {
 	for _, tl := range list["result"].(map[string]any)["tools"].([]any) {
 		names += tl.(map[string]any)["name"].(string) + " "
 	}
-	for _, want := range []string{"fleet_status", "fleet_peek", "fleet_send", "fleet_answer", "fleet_spawn", "fleet_profiles", "fleet_close", "fleet_wall"} {
+	for _, want := range []string{"fleet_status", "fleet_peek", "fleet_send", "fleet_answer", "fleet_spawn", "fleet_profiles", "fleet_close", "fleet_wall", "fleet_note", "fleet_brief", "fleet_handoff"} {
 		if !strings.Contains(names, want) {
 			t.Errorf("missing tool %s", want)
 		}

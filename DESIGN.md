@@ -168,7 +168,7 @@ Built in **Go with Bubble Tea and Lip Gloss** (see ADR-10). It's one binary, the
 | error / stuck | red | still border, ✖ icon; stuck also shows "no output 12m" |
 | idle / done | grey | dimmed, no motion |
 | parked | dark grey | 💤, no process, no RAM shown |
-| supervisor | own tile | context fill: green < 40%, yellow 40–70%, red > 70% |
+| supervisor | own tile | context fill: green < 40%, yellow 40–69%, red ≥ 70% (built as the supervisor pane border label, §6.5) |
 
 Motion stays rare on purpose. If everything moves, nothing stands out. Only working tiles spin and only waiting tiles pulse.
 
@@ -186,7 +186,7 @@ Motion stays rare on purpose. If everything moves, nothing stands out. Only work
 | `z` / `w` | Park / wake |
 | `f` | Focus session on this agent (see 6.4) |
 | `c` | Move the cursor to the supervisor input |
-| `R` | Reset the supervisor (see 6.3) |
+| `R` | Reset the supervisor, after a y/n confirm (see 6.3, 6.5; tmux `M-R` does the same) |
 | `/` | Filter tiles by name, repo or status |
 | `1`–`9` | Jump to a repo group |
 | `?` | Help overlay |
@@ -210,12 +210,14 @@ The bottom tmux status line and the overview header show a short hint in plain w
 | Wall | `Alt-m` | wall: one main pane + stack |
 | Supervisor | `Alt-s` | show/hide the supervisor |
 | Supervisor | `Alt-S` | move the supervisor left/right |
+| Supervisor | `Alt-R` | reset the supervisor: fresh session from notes + handoff (asks y/n) |
 | Overview | `Alt-c` | overview: tiles ↔ compact chips |
 | Overview | `←↑↓→ / hjkl` | select a tile |
 | Overview | `⏎ / click` | show the selected agent on the wall |
 | Overview | `x` | take the selected agent off the wall |
 | Overview | `Tab` | jump to the next waiting agent |
 | Overview | `1/2/4/6/9/m` | same as Alt-1…9 / Alt-m |
+| Overview | `R` | same as Alt-R (reset the supervisor) |
 | Overview | `q` | quit the overview |
 
 `Alt-?` (tmux) · `?` (overview): show this list.
@@ -285,11 +287,46 @@ The supervisor reads `board.json`, agent cards and `decisions.log`. Anything it 
 Kill the supervisor process and start a fresh one with a boot prompt:
 "Read `~/.fleet/board.json` and the last 50 lines of `decisions.log`. Report what needs me, then wait." This loses nothing because state lives on disk.
 
-Automatic version: when the supervisor's context goes red, it writes anything pending to the board and resets itself.
+Automatic version: when the supervisor's context goes red, it writes anything pending to the board and resets itself. Built as described in §6.5.
 
 ### 6.4 Focus sessions (`f`)
 
 For a hard problem in one agent, open a short-lived supervisor that loads only that agent's card and raw pane. It can go deep, then updates the card and exits. The main supervisor only sees the updated card.
+
+### 6.5 Supervisor memory: notes, handoff, context meter (R11)
+
+The supervisor's chat fills up over a long day. Fleet does not compact it (ADR-4). The supervisor saves what it must not forget to disk as it goes. When its context gets full it writes a handoff and fleet replaces it with a fresh session that starts from the handoff and the board. Agents aren't affected: they live on the board and in tmux, not in the supervisor's chat.
+
+**On disk** (`~/.fleet/`)
+
+| Path | What |
+|---|---|
+| `decisions.log` | Append-only notes, one line each: `2026-11-04T21:40 [agent] text`. Decisions, user preferences, promises ("tell me when bs-nav is done"). |
+| `supervisor/session.json` | Current supervisor: `session_id`, `profile`, `pane_id`, `started`, `generation`, `previous` (last session ID). |
+| `supervisor/handoff.md` | Latest handoff written by the outgoing supervisor (max 4 KB is shown to the next one). Earlier ones are moved to `supervisor/handoffs/<timestamp>.md`; the last 20 are kept. |
+
+**Context meter.** For a Copilot supervisor, fill = `inputTokens / maxPromptTokens` of the last `session.usage_record` in `~/.copilot/session-state/<session_id>/events.jsonl`. Only the end of the file is read. The session ID comes from `session.json`, or from `--session-id <uuid>` in the supervisor pane's start command if the file is missing (supervisors started before this feature). No ID, a non-Copilot supervisor or no usage yet means the fill is unknown, and nothing is shown or warned.
+
+- Supervisor pane border: `supervisor · ctx 34%`, green < 40%, yellow 40–69%, red ≥ 70% (the handoff threshold; same bands as §5). The overview's refresh loop sets the `@fleet_ctx` pane option when the value changes.
+- `fleet supervisor` prints one line: short session ID, fill (`ctx 34% (68k/200k)`), generation, uptime. `--json` gives the same fields.
+
+**MCP tools** (supervisor)
+
+- `fleet_note(text, agent?)` appends a line to `decisions.log`.
+- `fleet_brief()` returns: the handoff (if any, with its time), the last 30 lines of `decisions.log`, then the same table as `fleet_status`. A fresh supervisor calls this first.
+- `fleet_handoff(summary)` writes `supervisor/handoff.md` (rotating the old one) and asks tmux to run `fleet supervisor reset --handoff` in the background after about 2 seconds. It returns at once, because the reset kills the supervisor and the MCP server with it. The summary covers things the board doesn't hold: open questions to the user, what it promised to watch, plans in flight. It doesn't restate agent statuses.
+- When the fill is at or above the threshold (default 70, env `FLEET_SUP_HANDOFF_PCT`), every fleet tool result ends with one line: `[supervisor context 74%: save anything pending with fleet_note, then call fleet_handoff]`.
+
+**Reset** (`fleet supervisor reset [--handoff]`, tmux `M-R`, overview `R`)
+
+1. Find the `@role=sup` pane in `fleet:main`. If there is none, fail with "no supervisor pane; run fleet up".
+2. If no handoff is newer than the current session's start (a manual reset), write a stub handoff: "Manual reset at <time>; previous supervisor wrote no handoff. Previous session: <id>."
+3. Build the same command as `fleet up` with a new session ID, plus for Copilot `-i "<boot prompt>"`. Boot prompt: "You are taking over as fleet supervisor. Call fleet_brief, tell the user in 1–3 lines what needs them, then wait."
+4. `respawn-pane -k` the supervisor pane with that command, then update `session.json` (generation + 1, `previous` = old ID). The old Copilot session isn't deleted; its ID is in the handoff, so `copilot --resume <id>` still opens it.
+
+`M-R` and overview `R` go through tmux `confirm-before` ("reset supervisor? (y/n)"), because a reset by mistake loses the chat. `--handoff` (called from `fleet_handoff`) doesn't ask.
+
+**Out of scope:** Copilot `/compact` or any in-place summarising; context meters for non-Copilot supervisors; deleting old supervisor sessions; agent cards (`agents/<name>.md`); focus sessions (§6.4).
 
 ---
 
@@ -397,6 +434,7 @@ Each component lives in its own Go package with its own `_test.go` file. `make t
 | Board and cards store | `internal/board` | Unit test in a temp directory: write, read, concurrent update, broken JSON recovery |
 | Tool adapters (spawn and resume command per tool, finding the session ID) | `internal/tools` | Unit test of the exact command lines; finding the session ID against a fake session folder |
 | Parking scheduler (cap, least recently used, RAM guard) | `internal/park` | Unit test with a fake clock and fake RAM readings |
+| Supervisor memory (§6.5) | `internal/supervisor` | Fill reads the last usage record from the tail of `events.jsonl`; handoff rotation keeps 20; notes format; colour band edges; reset respawns a fake supervisor on a `fleet-test-*` socket |
 | Summariser (`peek`) | `internal/summary` | Unit test with a fake model: cache hit when the pane hash is unchanged, at most 5 lines out, raw text never returned in supervisor mode |
 | Approval gate (ADR-9) | `internal/gate` | Unit test: risky actions are held for approval, ordinary sends pass |
 | Wall manager (layouts, pin, swap out least recently used) | `internal/wall` | Integration test on a throwaway tmux server: bring 5 agents onto a 4-slot wall and check which one went back |
@@ -482,6 +520,11 @@ Why: changes show up in 1–2 seconds, and the dev loop costs no tokens or RAM.
 **ADR-9: the supervisor needs my approval for anything risky**
 Decision: the supervisor can read and send ordinary prompts. Approving, merging, pushing to shared branches, applying infrastructure or killing agents needs my `a` in the TUI.
 Why: a supervisor acting on 40 agents can do a lot of damage quickly.
+
+**ADR-11: hand off to a fresh supervisor instead of compacting** (R11, R21). *Builds on ADR-4.*
+Decision: the supervisor writes notes to `decisions.log` as it goes. At 70% context it writes a handoff and fleet respawns it with a new session that starts from `fleet_brief`. The fill is read from Copilot's own `events.jsonl` usage records. Warnings are added to MCP tool results, so the rule doesn't depend on the model remembering a prompt.
+Why: a fresh session with a brief of under 2k tokens is cheaper and more predictable than a compacted long chat. Fleet controls what survives: the board, notes and handoff, not a model-written summary of everything. The old session can still be resumed.
+Rejected: Copilot `/compact` (opaque, keeps growing, can't be triggered from outside); a supervisor summary written by another model (costs tokens; the supervisor knows best what is pending); restarting without a handoff (loses open questions to the user).
 
 **ADR-10: Go, one static binary** (R9, R12, R15, R16). *Replaces ADR-2.*
 Decision: write the CLI and the TUI in Go (Bubble Tea, Lip Gloss, bubblezone for mouse clicks) as a single `fleet` binary.

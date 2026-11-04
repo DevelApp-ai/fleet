@@ -14,7 +14,13 @@ import (
 	"github.com/sturlabragason/fleet/internal/board"
 )
 
-type fakeBE struct{ shown, hidden []string }
+type fakeBE struct {
+	shown, hidden []string
+	noWall        bool
+	ctx           [2]string
+	ctxSets       [][2]string
+	resets        int
+}
 
 func (f *fakeBE) Refresh() ([]*board.Agent, error) {
 	t0 := time.Now().Add(-time.Minute)
@@ -26,11 +32,17 @@ func (f *fakeBE) Refresh() ([]*board.Agent, error) {
 		{Name: "echo", Profile: "fake", Status: "idle", StatusSince: t0},
 	}, nil
 }
-func (f *fakeBE) OnWall() map[string]bool { return map[string]bool{"alpha": true} }
-func (f *fakeBE) Show(n string) error     { f.shown = append(f.shown, n); return nil }
-func (f *fakeBE) Hide(n string) error     { f.hidden = append(f.hidden, n); return nil }
-func (f *fakeBE) Preset(string) error     { return nil }
-func (f *fakeBE) WallEnabled() bool       { return true }
+func (f *fakeBE) OnWall() map[string]bool  { return map[string]bool{"alpha": true} }
+func (f *fakeBE) Show(n string) error      { f.shown = append(f.shown, n); return nil }
+func (f *fakeBE) Hide(n string) error      { f.hidden = append(f.hidden, n); return nil }
+func (f *fakeBE) Preset(string) error      { return nil }
+func (f *fakeBE) WallEnabled() bool        { return !f.noWall }
+func (f *fakeBE) SupCtx() (string, string) { return f.ctx[0], f.ctx[1] }
+func (f *fakeBE) SetSupCtx(l, c string) error {
+	f.ctxSets = append(f.ctxSets, [2]string{l, c})
+	return nil
+}
+func (f *fakeBE) ResetSup() error { f.resets++; return nil }
 
 func TestOrderAndKeys(t *testing.T) {
 	zone.NewGlobal()
@@ -178,5 +190,50 @@ func TestHelpOverlayShortPane(t *testing.T) {
 		if ansi.StringWidth(l) > 120 {
 			t.Errorf("line wider than 120: %q", l)
 		}
+	}
+}
+
+func TestSupCtxSetOnlyWhenChanged(t *testing.T) {
+	be := &fakeBE{}
+	m := New(be, "")
+	tick := func() {
+		msg := m.poll()().(agentsMsg)
+		if cmd := m.syncSupCtx(msg.supCtx); cmd != nil {
+			cmd()
+		}
+	}
+	tick() // unknown: unset once
+	tick()
+	be.ctx = [2]string{"34%", "#a6e3a1"}
+	tick()
+	tick()
+	be.ctx = [2]string{"", ""}
+	tick()
+	want := [][2]string{{"", ""}, {"34%", "#a6e3a1"}, {"", ""}}
+	if len(be.ctxSets) != len(want) {
+		t.Fatalf("sets %v", be.ctxSets)
+	}
+	for i := range want {
+		if be.ctxSets[i] != want[i] {
+			t.Errorf("set %d: %v", i, be.ctxSets[i])
+		}
+	}
+}
+
+func TestResetKey(t *testing.T) {
+	be := &fakeBE{noWall: true}
+	m := New(be, "")
+	if cmd := m.key("R"); cmd != nil || m.msg != "R needs fleet up" {
+		t.Fatalf("no wall: msg=%q", m.msg)
+	}
+	be.noWall = false
+	m.msg = ""
+	cmd := m.key("R")
+	if cmd == nil {
+		t.Fatal("R must ask tmux to confirm")
+	}
+	cmd()
+	if be.resets != 1 || m.msg != "" {
+		t.Errorf("resets=%d msg=%q", be.resets, m.msg)
 	}
 }

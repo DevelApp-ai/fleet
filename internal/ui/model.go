@@ -31,11 +31,14 @@ type Model struct {
 	stateDir string
 	cfg      layout.Config
 	now      func() time.Time
+	supCtx   [2]string // last label/colour set on the supervisor border
+	ctxSet   bool
 }
 
 type agentsMsg struct {
 	agents []*board.Agent
 	onWall map[string]bool
+	supCtx [2]string
 	err    error
 }
 type pollMsg struct{}
@@ -66,7 +69,8 @@ func (m *Model) poll() tea.Cmd {
 	be := m.be
 	return func() tea.Msg {
 		as, err := be.Refresh()
-		return agentsMsg{agents: as, onWall: be.OnWall(), err: err}
+		l, c := be.SupCtx()
+		return agentsMsg{agents: as, onWall: be.OnWall(), supCtx: [2]string{l, c}, err: err}
 	}
 }
 
@@ -99,7 +103,7 @@ func (m *Model) Update(msg tea.Msg) (_ tea.Model, cmd tea.Cmd) {
 		}
 		m.setAgents(msg.agents)
 		m.onWall = msg.onWall
-		return m, pollLater()
+		return m, tea.Batch(pollLater(), m.syncSupCtx(msg.supCtx))
 	case pollMsg:
 		return m, m.poll()
 	case animMsg:
@@ -215,6 +219,18 @@ func (m *Model) key(k string) tea.Cmd {
 		m.saveCursor()
 	case "enter":
 		return m.show()
+	case "R":
+		if !m.be.WallEnabled() {
+			m.msg = "R needs fleet up"
+			return nil
+		}
+		be := m.be
+		return func() tea.Msg {
+			if err := be.ResetSup(); err != nil {
+				return infoMsg("reset: " + err.Error())
+			}
+			return nil
+		}
 	case "x":
 		name, be := m.sel, m.be
 		if name == "" || !m.onWall[name] {
@@ -255,5 +271,20 @@ func (m *Model) show() tea.Cmd {
 			return infoMsg("show " + name + ": " + err.Error())
 		}
 		return infoMsg(name + " on wall")
+	}
+}
+
+// syncSupCtx updates the supervisor border meter only when it changed.
+func (m *Model) syncSupCtx(v [2]string) tea.Cmd {
+	if m.ctxSet && v == m.supCtx {
+		return nil
+	}
+	m.supCtx, m.ctxSet = v, true
+	be := m.be
+	return func() tea.Msg {
+		if err := be.SetSupCtx(v[0], v[1]); err != nil {
+			logx.For("ui").Warn("set supervisor ctx", "err", err)
+		}
+		return nil
 	}
 }

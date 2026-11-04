@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sturlabragason/fleet/internal/supervisor"
 	"github.com/sturlabragason/fleet/internal/tools"
 )
 
@@ -42,12 +43,17 @@ var toolDefs = []tool{
 		"name": str("agent name"), "confirmed": confirmedProp})},
 	{"fleet_wall", "Change the live wall: show or hide an agent pane, or set the layout preset (1,2,4,6,9,m).", obj([]string{"action"}, map[string]any{
 		"action": map[string]any{"type": "string", "enum": []string{"show", "hide", "preset"}}, "name": str("agent name for show/hide"), "preset": str("1, 2, 4, 6, 9 or m")})},
+	{"fleet_note", "Save one line to the decisions log: a user decision, preference or promise. Survives a supervisor reset.", obj([]string{"text"}, map[string]any{
+		"text": str("the note, one line"), "agent": str("optional agent the note is about")})},
+	{"fleet_brief", "Start-of-session brief: the last handoff, recent notes and the agent table. Call first in a fresh session.", obj(nil, map[string]any{})},
+	{"fleet_handoff", "Write a handoff and get replaced by a fresh supervisor in a few seconds. Include open questions, promises and plans in flight, not agent statuses.", obj([]string{"summary"}, map[string]any{
+		"summary": str("what the next supervisor must know")})},
 }
 
 type args struct {
-	Name, Text, Answer, Profile, Dir, Prompt, Action, Preset string
-	Lines                                                    int
-	Confirmed                                                bool
+	Name, Text, Answer, Profile, Dir, Prompt, Action, Preset, Agent, Summary string
+	Lines                                                                    int
+	Confirmed                                                                bool
 }
 
 func (s *Server) call(name string, raw json.RawMessage) (string, error) {
@@ -143,6 +149,24 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 			return a.Name + " off wall", s.W.Hide(p)
 		}
 		return "", fmt.Errorf("action must be show, hide or preset")
+	case "fleet_note":
+		if err := need(strings.TrimSpace(a.Text), "text"); err != nil {
+			return "", err
+		}
+		return "noted", supervisor.AppendNote(s.F.Home, a.Agent, a.Text)
+	case "fleet_brief":
+		return s.brief()
+	case "fleet_handoff":
+		if err := need(strings.TrimSpace(a.Summary), "summary"); err != nil {
+			return "", err
+		}
+		if err := supervisor.WriteHandoff(s.F.Home, a.Summary); err != nil {
+			return "", err
+		}
+		if err := s.Reset(); err != nil {
+			return "", fmt.Errorf("handoff saved, but reset failed: %v", err)
+		}
+		return "handoff saved; a fresh supervisor takes over in a few seconds. Stop here.", nil
 	}
 	return "", fmt.Errorf("unknown tool %q", name)
 }
@@ -172,5 +196,27 @@ func (s *Server) status() (string, error) {
 		}
 		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s\n", a.Name, a.Profile, a.Status, w, time.Since(a.StatusSince).Round(time.Second), wf)
 	}
+	return b.String(), nil
+}
+
+// brief is the handoff, the last 30 notes and the status table.
+func (s *Server) brief() (string, error) {
+	var b strings.Builder
+	if h, at, ok := supervisor.ReadHandoff(s.F.Home); ok {
+		fmt.Fprintf(&b, "## Handoff (%s)\n%s\n\n", at.Format("2006-01-02 15:04"), h)
+	} else {
+		b.WriteString("## Handoff\nnone\n\n")
+	}
+	b.WriteString("## Notes\n")
+	if notes := supervisor.TailNotes(s.F.Home, 30); len(notes) > 0 {
+		b.WriteString(strings.Join(notes, "\n") + "\n\n")
+	} else {
+		b.WriteString("none\n\n")
+	}
+	st, err := s.status()
+	if err != nil {
+		return "", err
+	}
+	b.WriteString("## Agents\n" + st)
 	return b.String(), nil
 }

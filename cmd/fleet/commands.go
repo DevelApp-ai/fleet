@@ -26,6 +26,9 @@ const usage = `usage:
   fleet peek <name> [--raw] [-n 200]
   fleet close <name>                        stop an agent and remove it from the board
   fleet mcp                                 stdio MCP server for the supervisor
+  fleet supervisor [--json]                 supervisor session, context fill, generation, uptime
+  fleet supervisor reset [--handoff]        replace the supervisor with a fresh session (M-R)
+  fleet note [--agent NAME] "text"          append a note to ~/.fleet/decisions.log
   fleet profiles                            list tool profiles (~/.fleet/tools.toml)
   fleet wall <layout|show NAME>             wall control (used by tmux key bindings)
   fleet keys [--markdown]                   list every hotkey (Alt-? in tmux, ? in the overview)`
@@ -75,6 +78,10 @@ func run(args []string) error {
 			fmt.Printf("%-16s %s  (patterns=%s)\n", n, strings.Join(p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", ID: "<id>"}, false), " "), p.Patterns)
 		}
 		return nil
+	case "supervisor":
+		return cmdSupervisor(f, rest)
+	case "note":
+		return cmdNote(f, rest)
 	case "ui":
 		return cmdUI(f)
 	case "up":

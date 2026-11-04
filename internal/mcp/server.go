@@ -14,6 +14,8 @@ import (
 
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/supervisor"
+	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
@@ -27,13 +29,43 @@ const ProtocolVersion = "2025-06-18"
 
 // Server serves fleet tools.
 type Server struct {
-	F  *fleet.Fleet
-	W  *wall.Wall
-	mu sync.Mutex
+	F *fleet.Fleet
+	W *wall.Wall
+	// Fill reports the supervisor's context use (tests replace it).
+	Fill func() (used, max int, ok bool)
+	// Reset asks tmux to replace the supervisor after a handoff (tests stub it).
+	Reset func() error
+	mu    sync.Mutex
 }
 
 // New returns a server.
-func New(f *fleet.Fleet, w *wall.Wall) *Server { return &Server{F: f, W: w} }
+func New(f *fleet.Fleet, w *wall.Wall) *Server {
+	s := &Server{F: f, W: w}
+	s.Fill = func() (int, int, bool) { return supervisor.CurrentFill(f.Home, f.T, fleet.Session+":main") }
+	s.Reset = func() error {
+		// tmux runs the reset, so it survives this MCP server being killed with the supervisor.
+		_, err := f.T.Run("run-shell", "-b", "sleep 2; "+tools.Quote(f.Exe)+" supervisor reset --handoff")
+		return err
+	}
+	return s
+}
+
+// contextWarning is appended to tool results once the supervisor's context
+// is at or above the handoff threshold ("" otherwise).
+func (s *Server) contextWarning() string {
+	if s.Fill == nil {
+		return ""
+	}
+	used, max, ok := s.Fill()
+	if !ok {
+		return ""
+	}
+	pct := supervisor.Pct(used, max)
+	if pct < supervisor.Threshold() {
+		return ""
+	}
+	return fmt.Sprintf("\n\n[supervisor context %d%%: save anything pending with fleet_note, then call fleet_handoff]", pct)
+}
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -122,10 +154,14 @@ func (s *Server) handle(req request) (res any, rerr *rpcError) {
 		text, err := s.call(p.Name, p.Arguments)
 		s.mu.Unlock()
 		log.Info("call", "tool", p.Name, "err", err)
-		if err != nil {
-			return toolResult(err.Error(), true), nil
+		isErr := err != nil
+		if isErr {
+			text = err.Error()
 		}
-		return toolResult(text, false), nil
+		if p.Name != "fleet_handoff" {
+			text += s.contextWarning()
+		}
+		return toolResult(text, isErr), nil
 	}
 	return nil, &rpcError{-32601, "method not found: " + req.Method}
 }

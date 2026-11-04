@@ -60,6 +60,8 @@ var Bindings = []Binding{
 		Desc: "show/hide the supervisor", Hints: map[Scope]string{ScopeTmux: "Alt-s supervisor"}},
 	{Group: Supervisor, Key: "Alt-S", Tmux: []string{"M-S"},
 		Desc: "move the supervisor left/right"},
+	{Group: Supervisor, Key: "Alt-R", Tmux: []string{"M-R"},
+		Desc: "reset the supervisor: fresh session from notes + handoff (asks y/n)"},
 	{Group: Overview, Key: "Alt-c", Tmux: []string{"M-c"},
 		Desc: "overview: tiles ↔ compact chips"},
 	{Group: Overview, Key: "←↑↓→ / hjkl",
@@ -72,6 +74,8 @@ var Bindings = []Binding{
 		Desc: "jump to the next waiting agent", Hints: map[Scope]string{ScopeOverview: "Tab next waiting"}},
 	{Group: Overview, Key: "1/2/4/6/9/m",
 		Desc: "same as Alt-1…9 / Alt-m"},
+	{Group: Overview, Key: "R",
+		Desc: "same as Alt-R (reset the supervisor)"},
 	{Group: Overview, Key: "q",
 		Desc: "quit the overview"},
 }

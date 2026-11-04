@@ -11,4 +11,9 @@ type Backend interface {
 	Preset(p string) error  // wall layout 1/2/4/6/9/m
 	Hide(name string) error // send back to its hidden window
 	WallEnabled() bool
+	// SupCtx is the supervisor context meter: label ("34%") and colour,
+	// both "" when the fill is unknown.
+	SupCtx() (label, color string)
+	SetSupCtx(label, color string) error // "" unsets the border option
+	ResetSup() error                     // ask tmux to confirm, then reset the supervisor
 }

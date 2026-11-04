@@ -1,0 +1,206 @@
+package supervisor
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func writeEvents(t *testing.T, home, id, body string) {
+	t.Helper()
+	d := filepath.Join(home, "session-state", id)
+	os.MkdirAll(d, 0o755)
+	if err := os.WriteFile(filepath.Join(d, "events.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func usage(in, max int) string {
+	return fmt.Sprintf(`{"type":"session.usage_record","data":{"usage":{"inputTokens":%d,"maxPromptTokens":%d}}}`+"\n", in, max)
+}
+
+func TestFillPicksLastUsageRecord(t *testing.T) {
+	old := tailChunk
+	tailChunk = 1 << 10
+	t.Cleanup(func() { tailChunk = old })
+	home := t.TempDir()
+	var b strings.Builder
+	b.WriteString(usage(1000, 200000))
+	for i := 0; i < 2000; i++ { // large prefix: more than one tail window
+		fmt.Fprintf(&b, `{"type":"assistant.message","data":{"content":"line %d mentions session.usage_record"}}`+"\n", i)
+	}
+	writeEvents(t, home, "s1", b.String())
+	// the only record is far from the end: the window has to widen
+	if u, m, ok := Fill(home, "s1"); !ok || u != 1000 || m != 200000 {
+		t.Fatalf("widen: %d %d %v", u, m, ok)
+	}
+	b.WriteString(usage(68000, 200000))
+	b.WriteString(`{"type":"tool.execution_complete","data":{}}` + "\n")
+	b.WriteString(usage(74000, 200000))
+	b.WriteString(`{"type":"user.message","data":{"content":"hi"}}` + "\n")
+	writeEvents(t, home, "s2", b.String())
+	if u, m, ok := Fill(home, "s2"); !ok || u != 74000 || m != 200000 {
+		t.Fatalf("last: %d %d %v", u, m, ok)
+	}
+}
+
+func TestFillUnknown(t *testing.T) {
+	home := t.TempDir()
+	if _, _, ok := Fill(home, "missing"); ok {
+		t.Error("missing file must be unknown")
+	}
+	if _, _, ok := Fill(home, ""); ok {
+		t.Error("empty id must be unknown")
+	}
+	writeEvents(t, home, "s", `{"type":"session.start","data":{}}`+"\n")
+	if _, _, ok := Fill(home, "s"); ok {
+		t.Error("no usage yet must be unknown")
+	}
+}
+
+func TestSessionIDFromCommand(t *testing.T) {
+	for cmd, want := range map[string]string{
+		`bash -lc 'exec copilot --session-id 3f2a91c0-1111-4222-8333-444455556666 --no-custom-instructions'`: "3f2a91c0-1111-4222-8333-444455556666",
+		`copilot --session-id=abc`:                      "abc",
+		`bash -lc 'exec /x/fleet fakeagent supervisor'`: "",
+	} {
+		if got := SessionIDFromCommand(cmd); got != want {
+			t.Errorf("%s: got %q want %q", cmd, got, want)
+		}
+	}
+}
+
+func TestSessionRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	if _, ok := Load(home); ok {
+		t.Fatal("missing must not load")
+	}
+	s := Session{SessionID: "a", Profile: "copilot", PaneID: "%1", Started: time.Now().Round(time.Second), Generation: 2, Previous: "z"}
+	if err := Save(home, s); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := Load(home)
+	if !ok || got.SessionID != "a" || got.Generation != 2 || got.Previous != "z" || !got.Started.Equal(s.Started) {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestNotes(t *testing.T) {
+	home := t.TempDir()
+	now = func() time.Time { return time.Date(2026, 11, 4, 21, 40, 0, 0, time.Local) }
+	t.Cleanup(func() { now = time.Now })
+	AppendNote(home, "bs-nav", "user wants a ping\nwhen done")
+	AppendNote(home, "", "prefers short replies")
+	if err := AppendNote(home, "", "  "); err == nil {
+		t.Error("empty note must fail")
+	}
+	got := TailNotes(home, 30)
+	want := []string{"2026-11-04T21:40 [bs-nav] user wants a ping when done", "2026-11-04T21:40 prefers short replies"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q", got)
+	}
+	if got := TailNotes(home, 1); len(got) != 1 || got[0] != want[1] {
+		t.Errorf("tail 1: %q", got)
+	}
+}
+
+func TestHandoffRotationKeeps20(t *testing.T) {
+	home := t.TempDir()
+	for i := 0; i < 25; i++ {
+		if err := WriteHandoff(home, fmt.Sprintf("handoff %d", i)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	es, _ := os.ReadDir(filepath.Join(Dir(home), "handoffs"))
+	if len(es) != 20 {
+		t.Fatalf("kept %d", len(es))
+	}
+	b, _ := os.ReadFile(filepath.Join(Dir(home), "handoffs", es[len(es)-1].Name()))
+	if strings.TrimSpace(string(b)) != "handoff 23" {
+		t.Errorf("newest rotated: %q", b)
+	}
+	text, mt, ok := ReadHandoff(home)
+	if !ok || text != "handoff 24" || time.Since(mt) > time.Minute {
+		t.Fatalf("read %q %v %v", text, mt, ok)
+	}
+	WriteHandoff(home, strings.Repeat("x", 10000))
+	if text, _, _ := ReadHandoff(home); len(text) > 4200 || !strings.HasSuffix(text, "[truncated]") {
+		t.Errorf("cap: %d", len(text))
+	}
+}
+
+func TestBandEdges(t *testing.T) {
+	t.Setenv("FLEET_SUP_HANDOFF_PCT", "")
+	for pct, want := range map[int]string{0: ColorGreen, 39: ColorGreen, 40: ColorYellow, 69: ColorYellow, 70: ColorRed, 100: ColorRed} {
+		if got := Band(pct); got != want {
+			t.Errorf("%d: %s want %s", pct, got, want)
+		}
+	}
+	t.Setenv("FLEET_SUP_HANDOFF_PCT", "60")
+	if Band(59) != ColorYellow || Band(60) != ColorRed || Threshold() != 60 {
+		t.Error("threshold from env")
+	}
+}
+
+func TestFillCapsTail(t *testing.T) {
+	oc, om := tailChunk, maxTail
+	tailChunk, maxTail = 1<<10, 4<<10
+	t.Cleanup(func() { tailChunk, maxTail = oc, om })
+	home := t.TempDir()
+	body := usage(1000, 200000) + strings.Repeat(`{"type":"assistant.message","data":{}}`+"\n", 500)
+	writeEvents(t, home, "s", body)
+	if _, _, ok := Fill(home, "s"); ok {
+		t.Error("record beyond the max tail must be unknown")
+	}
+	writeEvents(t, home, "s", body+usage(5000, 200000))
+	if u, _, ok := Fill(home, "s"); !ok || u != 5000 {
+		t.Errorf("record in tail: %d %v", u, ok)
+	}
+}
+
+func TestLockSerialises(t *testing.T) {
+	home := t.TempDir()
+	unlock, err := Lock(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan struct{})
+	go func() {
+		u, _ := Lock(home)
+		close(got)
+		u()
+	}()
+	select {
+	case <-got:
+		t.Fatal("second lock must wait")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second lock never acquired")
+	}
+}
+
+func TestHandoffNamesSortByTime(t *testing.T) {
+	home := t.TempDir()
+	mt := time.Date(2026, 11, 4, 21, 0, 0, 0, time.Local)
+	for i := 0; i < 3; i++ { // same mtime every time: names collide
+		WriteHandoff(home, fmt.Sprintf("h%d", i))
+		os.Chtimes(filepath.Join(Dir(home), "handoff.md"), mt, mt)
+	}
+	es, _ := os.ReadDir(filepath.Join(Dir(home), "handoffs"))
+	var got []string
+	for _, e := range es {
+		b, _ := os.ReadFile(filepath.Join(Dir(home), "handoffs", e.Name()))
+		got = append(got, strings.TrimSpace(string(b)))
+	}
+	if strings.Join(got, ",") != "h0,h1" {
+		t.Errorf("lexical order %v", got)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/supervisor"
 	"github.com/sturlabragason/fleet/internal/ui"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
@@ -49,6 +51,40 @@ func (b *backend) Preset(p string) error {
 		return nil
 	}
 	return b.w.SetPreset(p)
+}
+
+func (b *backend) SupCtx() (string, string) {
+	if !b.enabled {
+		return "", ""
+	}
+	used, max, ok := supervisor.CurrentFill(b.f.Home, b.f.T, mainTarget())
+	if !ok {
+		return "", ""
+	}
+	pct := supervisor.Pct(used, max)
+	return fmt.Sprintf("%d%%", pct), supervisor.Band(pct)
+}
+
+func (b *backend) SetSupCtx(label, color string) error {
+	if !b.enabled {
+		return nil
+	}
+	pane, err := supervisor.FindPane(b.f.T, mainTarget())
+	if err != nil {
+		return nil // no supervisor, nothing to colour
+	}
+	if label == "" {
+		b.f.T.Run("set-option", "-p", "-u", "-t", pane, "@fleet_ctx")
+		_, err = b.f.T.Run("set-option", "-p", "-u", "-t", pane, "@fleet_ctx_color")
+		return err
+	}
+	b.f.T.SetPaneOption(pane, "@fleet_ctx_color", color)
+	return b.f.T.SetPaneOption(pane, "@fleet_ctx", label)
+}
+
+func (b *backend) ResetSup() error {
+	_, err := b.f.T.Run(confirmResetArgs(b.f.Exe)...)
+	return err
 }
 
 // insideFleet reports whether this process runs in a pane of the fleet server.
