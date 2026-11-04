@@ -191,6 +191,38 @@ Motion stays rare on purpose. If everything moves, nothing stands out. Only work
 | `1`–`9` | Jump to a repo group |
 | `?` | Help overlay |
 
+### Hotkey hints and help (built)
+
+The bottom tmux status line and the overview header show a short hint in plain words, written with `Alt-` instead of tmux's `M-`. The full list is one keypress away:
+
+- **`Alt-?`** anywhere in the fleet tmux server opens a popup (`tmux display-popup`) with every hotkey, grouped by area (panes, wall, supervisor, overview), one line each. Any key closes it. `fleet keys` prints the same list in a terminal.
+- **`?`** in the overview opens the same list as an overlay; `q`, `Esc` or `?` closes it.
+- One registry (`internal/keys`) is the single source of truth: the status hint, the overview hint, the popup, the overlay, `fleet keys` and the generated table below come from it. Tests fail if a tmux `M-*` binding in `fleet up` is missing from the registry (or the reverse), or if the table below is out of date (`fleet keys --markdown` regenerates it).
+
+<!-- keys:begin -->
+| Group | Key | Description |
+|---|---|---|
+| Panes | `Alt-←↑↓→` | move to the pane in that direction |
+| Panes | `Alt-z` | zoom this pane; press again to restore |
+| Panes | `Alt-x` | hide this pane (the agent keeps running) |
+| Panes | `Alt-o` | jump to the marked pane (right-click → Mark) |
+| Wall | `Alt-1/2/4/6/9` | wall: show up to N panes |
+| Wall | `Alt-m` | wall: one main pane + stack |
+| Supervisor | `Alt-s` | show/hide the supervisor |
+| Supervisor | `Alt-S` | move the supervisor left/right |
+| Overview | `Alt-c` | overview: tiles ↔ compact chips |
+| Overview | `←↑↓→ / hjkl` | select a tile |
+| Overview | `⏎ / click` | show the selected agent on the wall |
+| Overview | `x` | take the selected agent off the wall |
+| Overview | `Tab` | jump to the next waiting agent |
+| Overview | `1/2/4/6/9/m` | same as Alt-1…9 / Alt-m |
+| Overview | `q` | quit the overview |
+
+`Alt-?` (tmux) · `?` (overview): show this list.
+<!-- keys:end -->
+
+Out of scope: rebinding keys from config, mouse-clickable hints.
+
 ---
 
 ## 5a. Screen layout: a tiled wall of live sessions (R6, R7, R8, R9)
@@ -461,6 +493,11 @@ Why:
 - The coding agents write Go well, and a small Go program builds in well under a second, so the live loop stays fast.
 Cost: no live CSS reload as Textual has. The theme file and a 1–2 second rebuild cover most of that.
 Rejected: Python + Textual (quicker first draft, but brings a Python environment to maintain); Rust + Ratatui (fastest, but slower to write and compile); a bash script (fine for a prototype, breaks at this size).
+
+**ADR-12: one key registry; plain words; `Alt-?` for help**
+Decision: every hotkey lives once in `internal/keys`. The tmux status hint, overview header, `Alt-?` popup, `?` overlay, `fleet keys` and the §5 keys table are generated from it, and tests fail when tmux bindings or DESIGN.md drift from it. Hints say `Alt-`, not `M-`, and name what the key does.
+Why: the old hint ("M-s sup · M-S side · M-1/2/4/6/9/m wall") was cryptic, and three hand-written key lists had already drifted apart.
+Rejected: `Alt-h` for help (it did not reach tmux in a live test; `Alt-?` did, and matches the overview's `?`); keeping hints hand-written next to each binding.
 
 ---
 

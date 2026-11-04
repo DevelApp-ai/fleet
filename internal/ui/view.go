@@ -11,6 +11,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/sturlabragason/fleet/internal/board"
+	"github.com/sturlabragason/fleet/internal/keys"
 	"github.com/sturlabragason/fleet/internal/logx"
 )
 
@@ -28,6 +29,10 @@ func (m *Model) View() (out string) {
 	var b strings.Builder
 	b.WriteString(m.header())
 	b.WriteByte('\n')
+	if m.help {
+		b.WriteString(m.helpOverlay())
+		return zone.Scan(b.String())
+	}
 	cols := m.cols()
 	rows := (m.h - 2) / m.cfg.TileH
 	if rows < 0 {
@@ -53,17 +58,40 @@ func (m *Model) View() (out string) {
 	return zone.Scan(b.String())
 }
 
+// helpOverlay is the hotkey list centred below the header. Too tall for the
+// pane: two columns; still too tall: the bottom is cut, never the top.
+func (m *Model) helpOverlay() string {
+	avail := max(m.h-1, 1)
+	h := keys.HelpStyled(min(m.w, keys.PopupWidth()-2*keys.PopupMargin-2))
+	if strings.Count(h, "\n")+1 > avail {
+		h = keys.HelpColumns(m.w)
+	}
+	lines := strings.Split(h, "\n")
+	if len(lines) > avail {
+		lines = lines[:avail]
+	}
+	bw := 0
+	for i, l := range lines {
+		lines[i] = ansi.Truncate(l, m.w, "")
+		bw = max(bw, ansi.StringWidth(lines[i]))
+	}
+	for i, l := range lines { // one block width, so Place centres the block, not each line
+		lines[i] = l + strings.Repeat(" ", bw-ansi.StringWidth(l))
+	}
+	return lipgloss.Place(m.w, avail, lipgloss.Center, lipgloss.Center, strings.Join(lines, "\n"))
+}
+
 func (m *Model) header() string {
 	counts := map[string]int{}
 	for _, a := range m.agents {
 		counts[a.Status]++
 	}
 	h := fmt.Sprintf(" fleet · %d agents · %d working · %d waiting · %d error", len(m.agents), counts["working"], counts["waiting"], counts["error"]+counts["stuck"])
-	keys := "  ←↑↓→ move · ⏎ wall · x unwall · Tab waiting · 1/2/4/6/9/m layout · M-x hide pane · M-z zoom · M-←↑↓→ panes · M-s sup"
+	hint := "  " + keys.Hint(keys.ScopeOverview, m.w-ansi.StringWidth(h)-2)
 	if m.msg != "" {
-		keys = "  " + m.msg
+		hint = "  " + m.msg
 	}
-	return ansi.Truncate(lipgloss.NewStyle().Bold(true).Render(h)+lipgloss.NewStyle().Foreground(colIdle).Render(keys), m.w, "…")
+	return ansi.Truncate(lipgloss.NewStyle().Bold(true).Render(h)+lipgloss.NewStyle().Foreground(colIdle).Render(hint), m.w, "…")
 }
 
 func (m *Model) tile(a *board.Agent) string {

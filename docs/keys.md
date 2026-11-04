@@ -2,6 +2,8 @@
 
 fleet has two sets of keys: the overview TUI's own keys, and tmux bindings that `fleet up` sets on the `fleet` tmux server. The bindings are set with `bind-key -n` on that server only, so your own tmux setup is not touched.
 
+You don't need to remember them: `Alt+?` opens a popup with every key (any key closes it), `?` in the overview shows the same list, and `fleet keys` prints it. All of these, the status-line hint and the table in [DESIGN.md §5](../DESIGN.md#hotkey-hints-and-help-built) come from one registry, [`internal/keys`](../internal/keys/keys.go).
+
 ## Overview TUI
 
 Active when the overview pane has focus (click it, or `Alt+arrows`).
@@ -15,6 +17,7 @@ Active when the overview pane has focus (click it, or `Alt+arrows`).
 | Left click on a tile or chip | Select it and put it on the wall |
 | `x` | Take the selected agent off the wall |
 | `1` `2` `4` `6` `9` `m` | Wall layout (see below) |
+| `?` | Show all keys; `q`, `Esc` or `?` closes the list (`q` doesn't quit while it is open) |
 | `q`, `Ctrl+C` | Quit the overview. Run `fleet up` again to restart it. |
 
 The wall only works when the overview runs inside the fleet tmux server (`fleet up`). Run on its own (`fleet ui`), the overview shows tiles but `Enter` prints a hint instead.
@@ -33,6 +36,7 @@ Tile order: waiting, error, stuck, working, idle, then the rest; within waiting,
 | `Alt+Shift+s` | Move the supervisor to the other side |
 | `Alt+c` | Overview: tiles, or one line of chips |
 | `Alt+o` | Jump to the marked pane (`prefix m` marks one) |
+| `Alt+?` | Popup with every key; any key closes it |
 
 Mouse is on: click a pane to type in it, drag a border to resize, scroll to read history.
 
@@ -64,4 +68,3 @@ From [DESIGN.md §5](../DESIGN.md#5-the-tui); not built yet:
 | `R` | Reset the supervisor |
 | `/` | Filter tiles |
 | `P` | Pin a wall pane |
-| `?` | Help overlay |

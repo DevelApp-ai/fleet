@@ -7,12 +7,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"golang.org/x/term"
 
 	"github.com/sturlabragason/fleet/internal/fleet"
+	"github.com/sturlabragason/fleet/internal/keys"
 	"github.com/sturlabragason/fleet/internal/logx"
 	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
@@ -181,10 +183,16 @@ func ensureOverview(f *fleet.Fleet, target string) {
 
 // configure sets server options, key bindings, hooks and border polish.
 func configure(f *fleet.Fleet) {
-	t := f.T
+	for _, a := range tmuxCommands(f) {
+		f.T.Run(a...)
+	}
+}
+
+// tmuxCommands returns the tmux commands configure runs. Pure, so tests can
+// check the key bindings against the keys registry without tmux.
+func tmuxCommands(f *fleet.Fleet) [][]string {
 	exe := tools.Quote(f.Exe)
 	wallCmd := func(a string) string { return "run-shell -b '" + f.Exe + " wall " + a + "'" }
-	_ = exe
 	set := [][]string{
 		{"set-option", "-g", "mouse", "on"},
 		{"set-option", "-s", "escape-time", "10"},
@@ -196,8 +204,8 @@ func configure(f *fleet.Fleet) {
 		{"set-option", "-g", "window-style", "fg=#a8a8a8"},
 		{"set-option", "-g", "window-active-style", "fg=default"},
 		{"set-option", "-g", "status-left", "#[bold] fleet #[default]"},
-		{"set-option", "-g", "status-right", "M-arrows panes · M-x hide pane · M-z zoom · M-s sup · M-S side · M-1/2/4/6/9/m wall "},
-		{"set-option", "-g", "status-right-length", "110"},
+		{"set-option", "-g", "status-right", keys.Hint(keys.ScopeTmux, statusRightLen-1) + " "},
+		{"set-option", "-g", "status-right-length", strconv.Itoa(statusRightLen)},
 		{"set-hook", "-g", "client-resized", wallCmd("apply")},
 		{"set-hook", "-g", "client-attached", wallCmd("apply")},
 		{"bind-key", "-n", "M-Left", "select-pane", "-L"},
@@ -210,14 +218,17 @@ func configure(f *fleet.Fleet) {
 		{"bind-key", "-n", "M-S", wallCmd("side")},
 		{"bind-key", "-n", "M-c", wallCmd("chips")},
 		{"bind-key", "-n", "M-o", "select-pane", "-t", "{marked}"},
+		{"bind-key", "-n", keys.HelpTmuxKey, "display-popup", "-E", "-b", "rounded",
+			"-w", strconv.Itoa(keys.PopupWidth()), "-h", strconv.Itoa(keys.PopupHeight()),
+			"-T", " fleet keys · any key closes ", exe + " keys --popup"},
 	}
 	for _, p := range []string{"1", "2", "4", "6", "9", "m"} {
 		set = append(set, []string{"bind-key", "-n", "M-" + p, wallCmd("preset " + p)})
 	}
-	for _, a := range set {
-		t.Run(a...)
-	}
+	return set
 }
+
+const statusRightLen = 110
 
 func cmdWall(f *fleet.Fleet, args []string) error {
 	w := wall.New(f.T, fleet.Session)

@@ -27,7 +27,8 @@ const usage = `usage:
   fleet close <name>                        stop an agent and remove it from the board
   fleet mcp                                 stdio MCP server for the supervisor
   fleet profiles                            list tool profiles (~/.fleet/tools.toml)
-  fleet wall <layout|show NAME>             wall control (used by tmux key bindings)`
+  fleet wall <layout|show NAME>             wall control (used by tmux key bindings)
+  fleet keys [--markdown]                   list every hotkey (Alt-? in tmux, ? in the overview)`
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -41,6 +42,9 @@ func run(args []string) error {
 		}
 		fake.Run(name, os.Stdin, os.Stdout)
 		return nil
+	}
+	if cmd == "keys" { // needs no fleet state
+		return cmdKeys(rest)
 	}
 	f, err := fleet.Open()
 	if err != nil {

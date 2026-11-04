@@ -66,7 +66,7 @@ fleet ls
 tmux -L fleet attach -t fleet:main
 ```
 
-In the overview, select a tile and press `Enter` to put it on the wall. Click into a wall pane and type `y` to answer its prompt. `M-4` picks a 2×2 wall.
+In the overview, select a tile and press `Enter` to put it on the wall. Click into a wall pane and type `y` to answer its prompt. `Alt+4` picks a 2×2 wall.
 
 Drop `FLEET_SUPERVISOR_PROFILE=fake` to get a real Copilot CLI supervisor. To stop everything: `tmux -L fleet kill-server`.
 
@@ -97,14 +97,16 @@ flowchart LR
   sup --- right
 ```
 
-- **Supervisor** (left, 90 columns, 64 below 220 columns wide). `M-s` hides it, `M-S` moves it to the other side.
-- **Overview** (top right, 14 rows). Tiles for as many agents as fit, one-line chips for the rest. `M-c` switches to chips only.
+- **Supervisor** (left, 90 columns, 64 below 220 columns wide). `Alt+s` hides it, `Alt+S` moves it to the other side.
+- **Overview** (top right, 14 rows). Tiles for as many agents as fit, one-line chips for the rest. `Alt+c` switches to chips only.
 - **Wall** (below). Live agent panes. Each pane border shows the agent's name and status in its status colour.
 - Agents not on the wall live in hidden windows `ag-<name>`.
 
 All geometry is in [`internal/layout`](internal/layout/config.go).
 
 ## Keys
+
+**Press `Alt+?` anywhere in the fleet window for a popup with every key**, grouped by area (panes, wall, supervisor, overview). Any key closes it. In the overview, `?` shows the same list; `q`, `Esc` or `?` closes it. `fleet keys` prints it in a terminal. The status line at the bottom shows the most used keys in plain words.
 
 Overview (when the overview pane has focus):
 
@@ -115,6 +117,7 @@ Overview (when the overview pane has focus):
 | `Enter`, left click | Put the selected agent on the wall |
 | `x` | Take the selected agent off the wall |
 | `1` `2` `4` `6` `9` `m` | Wall layout |
+| `?` | Show all keys |
 | `q`, `Ctrl+C` | Quit the overview (`fleet up` restarts it) |
 
 Anywhere in the fleet window (tmux bindings, no prefix; only on the `fleet` server):
@@ -128,6 +131,7 @@ Anywhere in the fleet window (tmux bindings, no prefix; only on the `fleet` serv
 | `Alt+s` / `Alt+S` | Hide/show the supervisor / move it to the other side |
 | `Alt+c` | Overview: tiles or chips only |
 | `Alt+o` | Jump to the marked pane |
+| `Alt+?` | Show all keys in a popup |
 
 Mouse is on: click a pane to type in it, drag borders to resize, scroll for history. Details and planned keys: [docs/keys.md](docs/keys.md).
 

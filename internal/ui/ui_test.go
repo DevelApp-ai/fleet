@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 	zone "github.com/lrstanley/bubblezone"
 
@@ -109,5 +110,73 @@ func TestXHidesOnlyWallTiles(t *testing.T) {
 	m.key("x")()
 	if len(be.hidden) != 1 || be.hidden[0] != "alpha" {
 		t.Errorf("hidden %v", be.hidden)
+	}
+}
+
+func TestHelpOverlay(t *testing.T) {
+	zone.NewGlobal()
+	m := New(&fakeBE{}, "")
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+	as, _ := (&fakeBE{}).Refresh()
+	m.setAgents(as)
+	if v := m.View(); !strings.Contains(v, "←↑↓→ select · ⏎ show on wall · x take off wall · Tab next waiting · ? all keys") {
+		t.Errorf("header hint:\n%s", v)
+	}
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if h := m.header(); !strings.Contains(h, "? all keys") || ansi.StringWidth(h) > 100 {
+		t.Errorf("narrow header must keep \"? all keys\": %q", h)
+	}
+	press := func(r string) tea.Cmd {
+		_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r)})
+		return cmd
+	}
+	press("?")
+	v := m.View()
+	if !strings.Contains(v, "hide this pane (the agent keeps running)") || strings.Contains(v, "╭") {
+		t.Fatalf("overlay should replace tiles:\n%s", v)
+	}
+	if cmd := press("q"); cmd != nil {
+		t.Fatal("q with the overlay open must not quit")
+	}
+	if m.help || strings.Contains(m.View(), "hide this pane (the agent keeps running)") {
+		t.Fatal("q should close the overlay")
+	}
+	press("?")
+	press("?")
+	if m.help {
+		t.Fatal("? should toggle the overlay closed")
+	}
+	press("?")
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.help {
+		t.Fatal("esc should close the overlay")
+	}
+	if cmd := press("q"); cmd == nil {
+		t.Fatal("q without the overlay quits")
+	}
+}
+
+// TestHelpOverlayShortPane: the overview pane is ~14 rows, shorter than the
+// help list. The overlay switches to two columns and never loses the top.
+func TestHelpOverlayShortPane(t *testing.T) {
+	zone.NewGlobal()
+	m := New(&fakeBE{}, "")
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 14})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	v := ansi.Strip(m.View())
+	lines := strings.Split(v, "\n")
+	if len(lines) > 14 {
+		t.Errorf("view is %d lines, pane is 14", len(lines))
+	}
+	// columns are half width, so the Alt-z description may wrap after "again to"
+	for _, want := range []string{"Panes", "Supervisor", "Alt-z         zoom this pane; press again", "Alt-m         wall: one main pane"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("missing %q:\n%s", want, v)
+		}
+	}
+	for _, l := range lines {
+		if ansi.StringWidth(l) > 120 {
+			t.Errorf("line wider than 120: %q", l)
+		}
 	}
 }

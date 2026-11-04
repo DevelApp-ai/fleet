@@ -27,6 +27,7 @@ type Model struct {
 	frame    int
 	animate  bool
 	msg      string
+	help     bool // ? overlay with every hotkey replaces the tiles
 	stateDir string
 	cfg      layout.Config
 	now      func() time.Time
@@ -109,7 +110,7 @@ func (m *Model) Update(msg tea.Msg) (_ tea.Model, cmd tea.Cmd) {
 	case tea.KeyMsg:
 		return m, m.key(msg.String())
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
+		if !m.help && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
 			for _, a := range m.agents {
 				if zone.Get("tile-" + a.Name).InBounds(msg) {
 					m.sel = a.Name
@@ -170,9 +171,20 @@ func (m *Model) key(k string) tea.Cmd {
 		m.sel = m.agents[j].Name
 		m.saveCursor()
 	}
+	if m.help {
+		switch k {
+		case "q", "esc", "?": // q closes the overlay, it doesn't quit
+			m.help = false
+		case "ctrl+c":
+			return tea.Quit
+		}
+		return nil
+	}
 	switch k {
 	case "q", "ctrl+c":
 		return tea.Quit
+	case "?":
+		m.help = true
 	case "left", "h":
 		move(-1)
 	case "right", "l":
