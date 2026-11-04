@@ -1,0 +1,4 @@
+✖ Error: build failed
+
+✔ Done: x
+> 

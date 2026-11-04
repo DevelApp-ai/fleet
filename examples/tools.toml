@@ -1,0 +1,40 @@
+# Example ~/.fleet/tools.toml. Copy what you need:
+#   mkdir -p ~/.fleet && cp examples/tools.toml ~/.fleet/tools.toml
+#
+# Each [section] is a profile name for `fleet spawn <name> <profile>`.
+# Fields override the built-in profile of the same name, or define a new one.
+#   command    program to run (looked up on the login PATH)
+#   args       extra arguments, always passed
+#   env        environment for the agent; $VAR and ${VAR} are expanded
+#   launch_id  arguments that set a session id at launch ({id} = new UUID)
+#   resume     arguments that resume a session ({id}); used by park/wake (planned)
+#   patterns   status pattern set: copilot, claude, agy, vibe or fake
+# Placeholders: {fleet} = fleet binary, {name} = agent name, {id} = session id.
+
+# Claude model through the Copilot CLI.
+[claude-copilot]
+command = "copilot"
+args = ["--model", "claude-opus-5"]
+launch_id = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+patterns = "copilot"
+
+# Two Claude Code accounts, kept apart by config directory.
+[claude-personal]
+command = "claude"
+env = { CLAUDE_CONFIG_DIR = "$HOME/.claude-personal" }
+launch_id = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+patterns = "claude"
+
+[claude-work]
+command = "claude"
+args = ["--model", "claude-sonnet-5"]
+env = { CLAUDE_CONFIG_DIR = "$HOME/.claude-work" }
+launch_id = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+patterns = "claude"
+
+# Override a built-in: always start copilot with an extra flag.
+# [copilot]
+# args = ["--allow-all"]

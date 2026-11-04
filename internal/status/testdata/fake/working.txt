@@ -1,0 +1,6 @@
+fakeagent a ready
+
+● Task: x
+⠹ Thinking… step 3 of x (esc to interrupt)
+
+

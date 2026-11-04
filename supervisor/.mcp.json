@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "fleet": {
+      "type": "local",
+      "command": "fleet",
+      "args": ["mcp"],
+      "tools": ["*"]
+    }
+  }
+}

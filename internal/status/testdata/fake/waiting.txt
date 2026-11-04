@@ -1,0 +1,5 @@
+⠹ Thinking… step 3 of x (esc to interrupt)
+
+I want to run `make test` in ./a
+Approve? [y/n] 
+

@@ -1,0 +1,162 @@
+// Package conf parses the small TOML subset fleet uses for its data files:
+// [section] headers (dotted names allowed), key = "string", key = ["a", "b"],
+// key = { K = "v" }, numbers/bools as raw strings, and # comments.
+package conf
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// Value is a string, []string or map[string]string.
+type Value any
+
+// Doc maps section name -> key -> value. Top-level keys use section "".
+type Doc map[string]map[string]Value
+
+// ParseFile reads and parses a file. A missing file returns an empty Doc.
+func ParseFile(path string) (Doc, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return Doc{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return Parse(string(b))
+}
+
+// Parse parses TOML-subset text.
+func Parse(s string) (Doc, error) {
+	d := Doc{"": {}}
+	sec := ""
+	for n, raw := range strings.Split(s, "\n") {
+		line := strings.TrimSpace(stripComment(raw))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			sec = strings.Trim(strings.TrimSpace(line[1:len(line)-1]), `"`)
+			if d[sec] == nil {
+				d[sec] = map[string]Value{}
+			}
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("line %d: expected key = value", n+1)
+		}
+		val, err := parseValue(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", n+1, err)
+		}
+		d[sec][strings.Trim(strings.TrimSpace(k), `"`)] = val
+	}
+	return d, nil
+}
+
+func stripComment(s string) string {
+	in := false
+	for i, r := range s {
+		switch {
+		case r == '"' && (i == 0 || s[i-1] != '\\'):
+			in = !in
+		case r == '\'' && !in:
+			// literal strings: toggle handled by scanning to next quote
+		case r == '#' && !in:
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func parseValue(v string) (Value, error) {
+	switch {
+	case strings.HasPrefix(v, "["):
+		if !strings.HasSuffix(v, "]") {
+			return nil, fmt.Errorf("unterminated array")
+		}
+		items, err := splitList(v[1 : len(v)-1])
+		if err != nil {
+			return nil, err
+		}
+		out := []string{}
+		for _, it := range items {
+			out = append(out, unquote(it))
+		}
+		return out, nil
+	case strings.HasPrefix(v, "{"):
+		if !strings.HasSuffix(v, "}") {
+			return nil, fmt.Errorf("unterminated inline table")
+		}
+		items, err := splitList(v[1 : len(v)-1])
+		if err != nil {
+			return nil, err
+		}
+		m := map[string]string{}
+		for _, it := range items {
+			k, val, ok := strings.Cut(it, "=")
+			if !ok {
+				return nil, fmt.Errorf("bad inline table entry %q", it)
+			}
+			m[strings.Trim(strings.TrimSpace(k), `"`)] = unquote(strings.TrimSpace(val))
+		}
+		return m, nil
+	}
+	return unquote(v), nil
+}
+
+// splitList splits on commas outside quotes.
+func splitList(s string) ([]string, error) {
+	var out []string
+	var cur strings.Builder
+	var q rune
+	for i, r := range s {
+		switch {
+		case q != 0:
+			if r == q && (q == '\'' || i == 0 || s[i-1] != '\\') {
+				q = 0
+			}
+			cur.WriteRune(r)
+		case r == '"' || r == '\'':
+			q = r
+			cur.WriteRune(r)
+		case r == ',':
+			if t := strings.TrimSpace(cur.String()); t != "" {
+				out = append(out, t)
+			}
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if q != 0 {
+		return nil, fmt.Errorf("unterminated string")
+	}
+	if t := strings.TrimSpace(cur.String()); t != "" {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func unquote(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		r := strings.NewReplacer(`\\`, `\`, `\"`, `"`, `\n`, "\n", `\t`, "\t")
+		return r.Replace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// Str returns a string field or "".
+func Str(m map[string]Value, k string) string { s, _ := m[k].(string); return s }
+
+// List returns a list field or nil.
+func List(m map[string]Value, k string) []string { l, _ := m[k].([]string); return l }
+
+// Map returns an inline-table field or nil.
+func Map(m map[string]Value, k string) map[string]string { t, _ := m[k].(map[string]string); return t }
