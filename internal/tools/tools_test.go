@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sturlabragason/fleet/internal/conf"
 )
 
 func TestDefaultsAndArgv(t *testing.T) {
@@ -30,7 +32,7 @@ func TestDefaultsAndArgv(t *testing.T) {
 	}
 	for _, c := range cases {
 		p := ps[c.profile]
-		got := p.Argv(Vars{Fleet: "/bin/fleet", Name: "a1", ID: c.id}, c.resume)
+		got, _ := p.Argv(Vars{Fleet: "/bin/fleet", Name: "a1", ID: c.id}, Launch{Resume: c.resume})
 		if !reflect.DeepEqual(got, c.want) || p.Patterns != c.patt {
 			t.Errorf("%s resume=%v: %v (%s) want %v", c.profile, c.resume, got, p.Patterns, c.want)
 		}
@@ -48,7 +50,7 @@ func TestExampleFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ps["claude-work"].Argv(Vars{ID: "U"}, false); !reflect.DeepEqual(got, []string{"claude", "--model", "claude-sonnet-5", "--session-id", "U"}) {
+	if got, _ := ps["claude-work"].Argv(Vars{ID: "U"}, Launch{}); !reflect.DeepEqual(got, []string{"claude", "--model", "claude-sonnet-5", "--session-id", "U"}) {
 		t.Errorf("claude-work: %v", got)
 	}
 	t.Setenv("HOME", "/h")
@@ -64,7 +66,7 @@ func TestUserOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ps["copilot"].Argv(Vars{}, false); !reflect.DeepEqual(got, []string{"copilot", "--x"}) {
+	if got, _ := ps["copilot"].Argv(Vars{}, Launch{}); !reflect.DeepEqual(got, []string{"copilot", "--x"}) {
 		t.Errorf("override: %v", got)
 	}
 	if ps["mine"].Command != "foo" || ps["mine"].Patterns != "claude" {
@@ -76,5 +78,172 @@ func TestShellCommand(t *testing.T) {
 	got := ShellCommand([]string{"copilot", "it's"})
 	if !strings.HasPrefix(got, "bash -lc ") || !strings.Contains(got, "exec copilot") {
 		t.Error(got)
+	}
+}
+
+func TestSessionPath(t *testing.T) {
+	home := t.TempDir()
+	ps, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for prof, want := range map[string]string{
+		"copilot":        "~/.copilot/session-state/{id}",
+		"claude-copilot": "~/.copilot/session-state/{id}",
+		"claude":         "~/.claude/projects/*/{id}.jsonl",
+		"agy":            "",
+		"fake":           "",
+	} {
+		if got := ps[prof].SessionPath; got != want {
+			t.Errorf("%s session_path %q want %q", prof, got, want)
+		}
+	}
+	if got, _ := ps["copilot"].Argv(Vars{ID: "S1"}, Launch{Resume: true}); !reflect.DeepEqual(got, []string{"copilot", "--resume", "S1"}) {
+		t.Errorf("resume argv %v", got)
+	}
+
+	data := t.TempDir()
+	os.MkdirAll(filepath.Join(data, "proj-a"), 0o755)
+	os.WriteFile(filepath.Join(data, "proj-a", "S1.jsonl"), nil, 0o644)
+	os.WriteFile(Path(home), []byte("[claude]\nsession_path = \""+data+"/*/{id}.jsonl\"\n"), 0o644)
+	ps, _ = Load(home)
+	p := ps["claude"]
+	if m := p.SessionMatches("S1"); len(m) != 1 || m[0] != filepath.Join(data, "proj-a", "S1.jsonl") {
+		t.Errorf("matches %v", m)
+	}
+	if m := p.SessionMatches("S2"); len(m) != 0 {
+		t.Errorf("unexpected %v", m)
+	}
+	if m := ps["fake"].SessionMatches("S1"); m != nil {
+		t.Errorf("fake %v", m)
+	}
+
+	t.Setenv("HOME", data)
+	p.SessionPath = "~/proj-a/{id}.jsonl"
+	if g := p.SessionGlob("S1"); g != filepath.Join(data, "proj-a", "S1.jsonl") {
+		t.Errorf("glob %q", g)
+	}
+	if m := p.SessionMatches("S1"); len(m) != 1 {
+		t.Errorf("~ matches %v", m)
+	}
+}
+
+func TestModeArgsAndPrompt(t *testing.T) {
+	ps, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cop := ps["copilot"]
+	got, embedded := cop.Argv(Vars{ID: "U"}, Launch{Mode: "autopilot", Prompt: "do it"})
+	want := []string{"copilot", "--allow-all", "--autopilot", "--session-id", "U", "-i", "do it"}
+	if !reflect.DeepEqual(got, want) || !embedded {
+		t.Errorf("autopilot argv %v embedded=%v want %v true", got, embedded, want)
+	}
+	// Unknown mode contributes nothing and is reported by HasMode.
+	if cop.HasMode("nope") {
+		t.Error("HasMode(nope) should be false")
+	}
+	if got, _ := cop.Argv(Vars{}, Launch{Mode: "nope"}); !reflect.DeepEqual(got, []string{"copilot"}) {
+		t.Errorf("unknown mode: %v", got)
+	}
+	if !cop.HasMode("") || !cop.HasMode("plan") {
+		t.Error("HasMode(\"\")/plan")
+	}
+	// extra_args land after the id args, before the prompt.
+	got, _ = cop.Argv(Vars{ID: "U"}, Launch{Extra: []string{"--reasoning-effort", "high"}, Prompt: "p"})
+	want = []string{"copilot", "--session-id", "U", "--reasoning-effort", "high", "-i", "p"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("extra args %v want %v", got, want)
+	}
+	// Claude takes the prompt positionally.
+	got, embedded = ps["claude"].Argv(Vars{}, Launch{Mode: "accept-edits", Prompt: "hi"})
+	want = []string{"claude", "--permission-mode", "acceptEdits", "hi"}
+	if !reflect.DeepEqual(got, want) || !embedded {
+		t.Errorf("claude argv %v embedded=%v want %v true", got, embedded, want)
+	}
+	// fake deliberately has no prompt_args: it stays on the paste path.
+	got, embedded = ps["fake"].Argv(Vars{Fleet: "/bin/fleet", Name: "a1"}, Launch{Prompt: "hi"})
+	if embedded || !reflect.DeepEqual(got, []string{"/bin/fleet", "fakeagent", "a1"}) {
+		t.Errorf("fake argv %v embedded=%v", got, embedded)
+	}
+}
+
+func TestLocalProfileLayer(t *testing.T) {
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, "tools.toml"), []byte("[copilot]\nargs = [\"--from-tools\"]\n"), 0o644)
+	local, err := conf.Parse(`
+[copilot]
+args = ["--from-config"]
+ready = "ready>"
+mode_keys = { autopilot = "C-a p" }
+
+[my-copilot]
+command = "copilot"
+args = ["--model", "claude-opus-5"]
+patterns = "copilot"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadWith(home, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ps["copilot"].Argv(Vars{}, Launch{}); !reflect.DeepEqual(got, []string{"copilot", "--from-config"}) {
+		t.Errorf("local layer did not win: %v", got)
+	}
+	if ps["copilot"].Ready != "ready>" {
+		t.Errorf("ready %q", ps["copilot"].Ready)
+	}
+	if got := ps["copilot"].ModeKeys["autopilot"]; !reflect.DeepEqual(got, []string{"C-a", "p"}) {
+		t.Errorf("mode_keys %v", got)
+	}
+	// Built-in fields not mentioned locally survive.
+	if !reflect.DeepEqual(ps["copilot"].PromptArgs, []string{"-i", "{prompt}"}) {
+		t.Errorf("prompt_args lost: %v", ps["copilot"].PromptArgs)
+	}
+	m := ps["my-copilot"]
+	if m.Command != "copilot" || m.Patterns != "copilot" {
+		t.Errorf("new profile %+v", m)
+	}
+}
+
+// auto_submit = false must fall back to the paste path: `copilot -i <prompt>`
+// submits the prompt itself, so embedding it would ignore the preference.
+func TestArgvNoPromptArgs(t *testing.T) {
+	p := Profile{Command: "copilot", PromptArgs: []string{"-i", "{prompt}"}}
+	argv, embedded := p.Argv(Vars{}, Launch{Prompt: "hi", NoPromptArgs: true})
+	if embedded {
+		t.Error("prompt embedded despite NoPromptArgs")
+	}
+	if strings.Join(argv, " ") != "copilot" {
+		t.Errorf("argv %v", argv)
+	}
+	if _, embedded := p.Argv(Vars{}, Launch{Prompt: "hi"}); !embedded {
+		t.Error("prompt should embed by default")
+	}
+}
+
+// A typo'd [profile.<name>] in the local config must not materialise a profile
+// with an empty command that `fleet profiles` lists and that spawns a corpse.
+func TestLoadWithIgnoresCommandlessLocalSections(t *testing.T) {
+	home := t.TempDir()
+	local := conf.Doc{
+		"coplot":  {"mode": "autopilot"},                     // typo: no command, no such profile
+		"copilot": {"args": []string{"--model", "x"}},        // overrides a built-in
+		"mine":    {"command": "mytool", "patterns": "fake"}, // defines a new profile
+	}
+	ps, err := LoadWith(home, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ps["coplot"]; ok {
+		t.Error("command-less local section created a profile")
+	}
+	if got := ps["copilot"].Args; !reflect.DeepEqual(got, []string{"--model", "x"}) {
+		t.Errorf("copilot args %v", got)
+	}
+	if ps["mine"].Command != "mytool" {
+		t.Errorf("mine = %+v", ps["mine"])
 	}
 }

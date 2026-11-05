@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/sturlabragason/fleet/internal/conf"
+	"github.com/sturlabragason/fleet/internal/logx"
 )
 
 // Profile describes how to launch one tool variant.
@@ -22,20 +23,61 @@ type Profile struct {
 	LaunchID []string // args to set a session id at launch, with {id}; empty = not supported
 	Resume   []string // args to resume, with {id}
 	Patterns string   // status pattern set name
+	// SessionPath is a glob (with {id} and a leading ~) where the tool stores a
+	// session; used by adopt to check it exists. Empty = no check.
+	SessionPath string
+
+	// PromptArgs carry the initial prompt at launch, with {prompt} substituted.
+	// When set and a prompt is given, fleet does not paste afterwards.
+	PromptArgs []string
+	// ModeArgs maps a starting-mode name to the args that select it.
+	ModeArgs map[string][]string
+	// ModeKeys maps a starting-mode name to tmux key names sent once the pane
+	// is ready, for tools that only offer a keystroke.
+	ModeKeys map[string][]string
+	// Ready is a regex that means "the TUI is accepting input". Empty = fall
+	// back to the profile's status patterns.
+	Ready string
+}
+
+// HasMode reports whether the profile knows the named starting mode.
+func (p Profile) HasMode(mode string) bool {
+	if mode == "" {
+		return true
+	}
+	_, a := p.ModeArgs[mode]
+	_, k := p.ModeKeys[mode]
+	return a || k
 }
 
 // Defaults are the built-in profiles. {fleet} is the fleet executable, {name} the agent name.
 const Defaults = `
 [copilot]
 command = "copilot"
+prompt_args = ["-i", "{prompt}"]
+mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan", interactive = "--mode interactive" }
 launch_id = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
+session_path = "~/.copilot/session-state/{id}"
+patterns = "copilot"
+
+[claude-copilot]
+command = "copilot"
+args = ["--model", "claude-opus-5", "--allow-all"]
+prompt_args = ["-i", "{prompt}"]
+mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan", interactive = "--mode interactive" }
+launch_id = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+session_path = "~/.copilot/session-state/{id}"
 patterns = "copilot"
 
 [claude]
 command = "claude"
+prompt_args = ["{prompt}"]
+mode_args = { accept-edits = "--permission-mode acceptEdits", plan = "--permission-mode plan", bypass = "--permission-mode bypassPermissions" }
 launch_id = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
+session_path = "~/.claude/projects/*/{id}.jsonl"
 patterns = "claude"
 
 [agy]
@@ -52,13 +94,18 @@ patterns = "vibe"
 command = "{fleet}"
 args = ["fakeagent", "{name}"]
 patterns = "fake"
+ready = "fakeagent .+ ready"
 `
 
 // Path is the user override file.
 func Path(home string) string { return filepath.Join(home, "tools.toml") }
 
 // Load returns built-in profiles overridden field-by-field by the user file.
-func Load(home string) (map[string]Profile, error) {
+func Load(home string) (map[string]Profile, error) { return LoadWith(home, nil) }
+
+// LoadWith is Load plus a third override layer (the [profile.<name>] sections
+// of the local preferences file, already re-keyed to profile names).
+func LoadWith(home string, local conf.Doc) (map[string]Profile, error) {
 	def, err := conf.Parse(Defaults)
 	if err != nil {
 		return nil, err
@@ -68,31 +115,24 @@ func Load(home string) (map[string]Profile, error) {
 		return nil, fmt.Errorf("tools.toml: %w", err)
 	}
 	out := map[string]Profile{}
-	for _, d := range []conf.Doc{def, user} {
+	for i, d := range []conf.Doc{def, user, local} {
+		local := i == 2
 		for name, sec := range d {
 			if name == "" {
 				continue
 			}
+			// A [profile.<name>] section in the local config is the only layer
+			// that can invent a profile, so a typo there would otherwise create
+			// a nameless, command-less profile that spawns into a dead pane.
+			// Only honour a local-only section when it actually sets a command.
+			if _, known := out[name]; local && !known && conf.Str(sec, "command") == "" {
+				logx.For("tools").Warn("ignoring local profile section: no command and no such tool profile",
+					"profile", name)
+				continue
+			}
 			p := out[name]
 			p.Name = name
-			if v := conf.Str(sec, "command"); v != "" {
-				p.Command = v
-			}
-			if v, ok := sec["args"]; ok {
-				p.Args, _ = v.([]string)
-			}
-			if v := conf.Map(sec, "env"); v != nil {
-				p.Env = v
-			}
-			if v, ok := sec["launch_id"]; ok {
-				p.LaunchID, _ = v.([]string)
-			}
-			if v, ok := sec["resume"]; ok {
-				p.Resume, _ = v.([]string)
-			}
-			if v := conf.Str(sec, "patterns"); v != "" {
-				p.Patterns = v
-			}
+			apply(&p, sec)
 			if p.Patterns == "" {
 				p.Patterns = name
 			}
@@ -100,6 +140,56 @@ func Load(home string) (map[string]Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// apply overlays one TOML section onto a profile; absent keys are left alone.
+func apply(p *Profile, sec map[string]conf.Value) {
+	if v := conf.Str(sec, "command"); v != "" {
+		p.Command = v
+	}
+	if v, ok := sec["args"]; ok {
+		p.Args, _ = v.([]string)
+	}
+	if v := conf.Map(sec, "env"); v != nil {
+		p.Env = v
+	}
+	if v, ok := sec["launch_id"]; ok {
+		p.LaunchID, _ = v.([]string)
+	}
+	if v, ok := sec["resume"]; ok {
+		p.Resume, _ = v.([]string)
+	}
+	if v := conf.Str(sec, "patterns"); v != "" {
+		p.Patterns = v
+	}
+	if v, ok := sec["session_path"]; ok {
+		p.SessionPath, _ = v.(string)
+	}
+	if v, ok := sec["prompt_args"]; ok {
+		p.PromptArgs, _ = v.([]string)
+	}
+	if v := conf.Map(sec, "mode_args"); v != nil {
+		p.ModeArgs = splitModes(v)
+	}
+	if v := conf.Map(sec, "mode_keys"); v != nil {
+		p.ModeKeys = splitModes(v)
+	}
+	if v, ok := sec["ready"]; ok {
+		p.Ready, _ = v.(string)
+	}
+}
+
+// splitModes turns an inline table of mode -> "a b c" into mode -> ["a","b","c"].
+// The conf TOML subset types inline tables as map[string]string, so a whole arg
+// list is written as one space-separated string. Limitation (documented in
+// DESIGN.md §4, README.md and examples/config.toml.example): an argument that
+// itself contains a space cannot be expressed this way.
+func splitModes(m map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for k, v := range m {
+		out[k] = strings.Fields(v)
+	}
+	return out
 }
 
 // Names returns sorted profile names.
@@ -119,14 +209,32 @@ func (v Vars) expand(s string) string {
 	return strings.NewReplacer("{fleet}", v.Fleet, "{name}", v.Name, "{id}", v.ID).Replace(s)
 }
 
-// Argv builds the launch argv. If resume, uses Resume args; else LaunchID (when id != "").
-func (p Profile) Argv(v Vars, resume bool, extra ...string) []string {
-	argv := []string{v.expand(p.Command)}
+// Launch describes everything beyond the profile that shapes one command line.
+type Launch struct {
+	Resume bool     // use Resume args instead of LaunchID
+	Mode   string   // name of a ModeArgs/ModeKeys entry; "" = the tool's default
+	Extra  []string // extra args from local preferences
+	Prompt string   // initial prompt, delivered via PromptArgs when the profile has them
+	// NoPromptArgs forbids carrying the prompt in argv even when the profile
+	// has PromptArgs. Set when auto_submit is off: `copilot -i <prompt>`
+	// submits the prompt itself, so honouring "paste but don't press Enter"
+	// means falling back to the paste path.
+	NoPromptArgs bool
+}
+
+// Argv builds the launch argv. embedded reports whether the prompt was placed
+// in the argv (PromptArgs); when false the caller must paste it after the pane
+// is ready. An unknown mode is ignored (see Profile.HasMode).
+func (p Profile) Argv(v Vars, l Launch) (argv []string, embedded bool) {
+	argv = []string{v.expand(p.Command)}
 	for _, a := range p.Args {
 		argv = append(argv, v.expand(a))
 	}
+	for _, a := range p.ModeArgs[l.Mode] {
+		argv = append(argv, v.expand(a))
+	}
 	switch {
-	case resume:
+	case l.Resume:
 		for _, a := range p.Resume {
 			argv = append(argv, v.expand(a))
 		}
@@ -135,7 +243,35 @@ func (p Profile) Argv(v Vars, resume bool, extra ...string) []string {
 			argv = append(argv, v.expand(a))
 		}
 	}
-	return append(argv, extra...)
+	argv = append(argv, l.Extra...)
+	if l.Prompt != "" && len(p.PromptArgs) > 0 && !l.NoPromptArgs {
+		for _, a := range p.PromptArgs {
+			argv = append(argv, strings.ReplaceAll(v.expand(a), "{prompt}", l.Prompt))
+		}
+		embedded = true
+	}
+	return argv, embedded
+}
+
+// SessionGlob returns SessionPath with {id} substituted and a leading ~ expanded.
+func (p Profile) SessionGlob(id string) string {
+	g := strings.ReplaceAll(p.SessionPath, "{id}", id)
+	if g == "~" || strings.HasPrefix(g, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			g = home + g[1:]
+		}
+	}
+	return g
+}
+
+// SessionMatches returns the paths where the session id is stored (nil when
+// SessionPath is unset or nothing matches).
+func (p Profile) SessionMatches(id string) []string {
+	if p.SessionPath == "" || id == "" {
+		return nil
+	}
+	m, _ := filepath.Glob(p.SessionGlob(id))
+	return m
 }
 
 // ShellCommand wraps argv into `bash -lc 'exec ...'` so login PATH applies

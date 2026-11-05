@@ -13,8 +13,10 @@ type Config struct {
 	OverviewRows  int // full overview: 2 tile rows + header + chips
 	ChipsOnlyRows int // compact overview
 	ChipsOnly     bool
-	Wall9MinCols  int // 9-slot wall allowed only at this width
 	MainPercent   int // M preset: main pane share of wall width
+	MinPaneW      int // smallest readable wall pane width
+	MinPaneH      int // smallest readable wall pane height (incl. the border-status row)
+	FocusPercent  int // emphasis pane share of the wall
 	TileW, TileH  int // overview tile size (used by the TUI)
 }
 
@@ -26,8 +28,10 @@ var Default = Config{
 	NarrowBelow:   220,
 	OverviewRows:  14,
 	ChipsOnlyRows: 3,
-	Wall9MinCols:  280,
 	MainPercent:   60,
+	MinPaneW:      64,
+	MinPaneH:      17,
+	FocusPercent:  60,
 	TileW:         26,
 	TileH:         6,
 }
@@ -51,27 +55,12 @@ func (c Config) OvRows() int {
 // Presets are the wall layouts: name -> slots.
 var Presets = map[string]int{"1": 1, "2": 2, "4": 4, "6": 6, "9": 9, "m": 4}
 
-// Slots returns the slot count for a preset at a window width (9 capped to 4 when narrow).
-func (c Config) Slots(preset string, w int) int {
+// Slots returns the slot cap for a preset. Presets cap how many panes may be
+// on the wall; the grid (see grid.go) decides the shape.
+func (c Config) Slots(preset string) int {
 	n, ok := Presets[preset]
 	if !ok {
 		n = 4
 	}
-	if n > 4 && preset == "9" && w < c.Wall9MinCols {
-		n = 4
-	}
 	return n
-}
-
-// gridCols returns columns for a preset.
-func gridCols(preset string) int {
-	switch preset {
-	case "1":
-		return 1
-	case "2", "4":
-		return 2
-	case "6", "9":
-		return 3
-	}
-	return 2
 }

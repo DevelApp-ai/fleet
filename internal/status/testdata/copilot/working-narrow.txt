@@ -1,0 +1,20 @@
+  Current   Sessions   Issues   Pull requests   Gists
+
+   cd ~/git/fleet.wt/teams && python3 - <<'EOF' impor… ┃
+ $ Shell Verify replacements applied 3 lines…                           ┃
+   cd ~/git/fleet.wt/teams && grep -c '◆' DESIGN.md .… ┃
+                                                                        ┃
+ ● Spec updated. Dispatching the builder.                               ┃
+                                                                        ┃
+ ○ Fleet-builder (model: claude-opus-5.5) Build teams feature           ┃
+   │ Shell Read board, theme, fleet 490 lines…                          ┃
+   │   cd ~/git/fleet.wt/teams && cat internal/board/… ┃
+   └ Shell Read tmux and fleet test 358 lines…                          ┃
+       cd ~/git/fleet.wt/teams && cat internal/tmux/p… ┃
+                                                                        ┃
+ ~/git/fleet         [⎇ main]                   Session: 100.00 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ ◎ Working · 54.1 KiB esc esc interrupt
+ctx ████░░░░ 50% (99k/200k)  pool ████░░░░ 54% (6.6/12G)

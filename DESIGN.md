@@ -120,7 +120,79 @@ Where the ID can't be set at launch, `fleet` has to find it after the start. It 
 | `fleet wake <name>` | Restart with the tool's resume flag in the same tmux window |
 | `fleet close <name>` | Stop it and archive the card (`kill` is a hidden alias) |
 | `fleet note <name> "text"` | Add an entry to `decisions.log` |
-| `fleet adopt <tool> <session-id> <dir>` | Bring an existing session (started outside fleet) under management by resuming it in tmux |
+| `fleet adopt [--name N] [--force] <profile> <session-id> [dir]` | Bring an existing session (started outside fleet) under management by resuming it in tmux (see below) |
+
+### `fleet adopt`
+
+Moves a session that was started in a plain terminal into fleet, one at a time (§8 item 6).
+
+- Starts the profile's `resume` args (`{id}` = the session ID) in a new hidden agent window, exactly like `spawn` but with no launch ID and no prompt. The board entry records the session ID, so `wake` and `park` work on it later.
+- **dir**: given, or for Copilot the `cwd:` from `~/.copilot/session-state/<id>/workspace.yaml`, or the current directory.
+- **name**: `--name`, or the base name of dir (made safe for names), with `-2`, `-3`… if taken.
+- **Session must exist**: profiles may set `session_path`, a glob with `{id}` and `~` (Copilot: `~/.copilot/session-state/{id}`, Claude: `<config dir>/projects/*/{id}.jsonl`). If it is set and nothing matches, adopt fails. Profiles without it (agy, vibe, fake) skip the check.
+- **Session must not be running**: two processes on one session corrupt it. Adopt refuses when a live process holds it: a Copilot `inuse.<pid>.lock` in the session folder with a live pid, or any process whose command line contains the session ID. The error names the pid and says to close that terminal first. `--force` skips both checks.
+- MCP: `fleet_adopt` (profile, session_id, optional dir and name), same checks.
+- Limit: a Claude session started fresh (no `--resume <id>` on its command line) has no lock file, so the in-use check can't see it. Close it before adopting.
+- Out of scope: discovering sessions to adopt (a picker), closing the outside terminal for you.
+
+### Spawn startup: autopilot and the first prompt (ADR-13)
+
+Measured on 2026-11-04 against Copilot CLI, the two reasons a freshly spawned agent needed hand-holding:
+
+1. **The first prompt was swallowed.** `spawn` slept a fixed 1500 ms and then pasted. The Copilot TUI is not in raw mode yet at that point, so both the pasted text *and* the Enter went nowhere — the input box stayed empty. Reproduced on `tmux -L fleet-test-autostart`: paste at 1.5 s → empty box; at 15 s → submitted.
+2. **The session started in Interactive / Manual Approval.** Nothing asked for autopilot, so every tool call stopped for approval.
+
+The fix is in two layers, both data-driven (profiles are data, ADR-5):
+
+- **Launch-time delivery, preferred.** A profile may declare `prompt_args` (args carrying the initial prompt, `{prompt}` substituted) and `mode_args` per mode. The tool then starts already in the right mode with the prompt submitted by the tool itself — no keystrokes, no race. Copilot: `prompt_args = ["-i", "{prompt}"]`, `mode_args = { autopilot = "--allow-all --autopilot" }`. `--autopilot` on its own opens a blocking "Enable autopilot mode" permission dialog; `--allow-all` is what makes it unattended, so it is part of the mode args. Claude Code's equivalent is `--permission-mode`.
+
+  `mode_args` and `mode_keys` are **inline tables of space-separated strings**, not of arrays: the `internal/conf` TOML subset types an inline table as `map[string]string`, and fleet splits each value on whitespace. A dotted key such as `mode_args.autopilot = [...]` is not part of the subset and is silently dropped. Limitation: an argument that itself contains a space cannot be expressed this way — a tool needing one has to get it from `args` or local `extra_args`.
+- **Paste fallback, for tools without those flags.** Wait until the pane is actually ready — poll `capture-pane` until the profile's status patterns classify it as **idle or waiting** (those two describe a live input box), or an explicit `ready` regex matches — then paste, then press Enter. `working` and `error` deliberately do not count: a bare spinner glyph matches the `working` patterns and can render during startup before the TUI is in raw mode, which is the very condition that lost the prompt. Tools whose banner arrives before any input box (the `fake` agent) set an explicit `ready` regex instead. A profile may also declare `mode_keys` (keys to send once ready) for tools that only offer a keystroke. Readiness replaces the fixed sleep in both paths.
+
+### Local spawn preferences (`$XDG_CONFIG_HOME/fleet/config.toml`)
+
+Repo defaults stay neutral: fleet out of the box spawns in whatever mode the tool defaults to. Autopilot is a **local, per-user** choice and lives in a file that is never committed — `$XDG_CONFIG_HOME/fleet/config.toml`, default `~/.config/fleet/config.toml` (`FLEET_CONFIG` overrides the path, for tests). It is the same TOML subset as `tools.toml`.
+
+```toml
+[defaults]                      # applies to every profile
+mode = "autopilot"              # "" = leave the tool's default
+auto_submit = true              # press Enter after a pasted prompt
+ready_timeout = "15s"           # how long to wait for the TUI before giving up
+
+[profile.copilot]               # per-profile override of the above
+mode = "autopilot"
+extra_args = ["--reasoning-effort", "high"]
+
+[profile.claude]
+mode = "accept-edits"
+
+[profile.my-copilot]            # defines a new profile, or overrides a built-in
+command = "copilot"
+args = ["--model", "claude-opus-5"]
+patterns = "copilot"
+```
+
+- `[profile.<name>]` is a third override layer for tool profiles, after the built-ins and `~/.fleet/tools.toml`; it accepts every `tools.toml` key, so a local file can define or redefine a profile without touching the repo.
+- `mode` names a key in the profile's `mode_args` / `mode_keys`. An unknown mode for a profile is logged and ignored rather than failing the spawn.
+- `extra_args` are appended to the launch argv.
+- Precedence: `[profile.<name>]` > `[defaults]` > built-in (no mode, `auto_submit = true`, `ready_timeout = 15s`). `spawn` blocks for up to `ready_timeout`, including the `fleet_spawn` MCP call, so the default stays well under a typical MCP client tool timeout.
+- `auto_submit = false` also disables launch-time prompt delivery: `copilot -i <prompt>` submits the prompt itself, so honouring "paste but don't press Enter" means falling back to the paste path.
+- A `[profile.<name>]` section that neither names an existing profile nor sets `command` is ignored with a warning, so a typo like `[profile.coplot]` cannot create a command-less profile.
+- Out of scope: changing the mode of an already running agent, and a CLI flag per spawn.
+### Finding sessions to adopt: `fleet sessions`
+
+Nobody remembers session IDs. Fleet finds them from the tools' own session stores, so adopt works with words.
+
+- `fleet sessions [--all] [--json] [-n 20] [words...]` lists sessions newest first: age, suggested profile, dir, title, short ID, and `in use` / `on board` markers. Title = the tool's own name for the session (Copilot `workspace.yaml` `name`/`summary`, Claude `custom-title`/`summary`), else the first user prompt, cut to one line.
+- Sources are the profiles' `session_path` globs (no new config). Several profiles sharing one store (copilot, claude-copilot) give one source; the suggested profile is the one whose `--model` matches the session's model family (claude vs gpt), else the one with no args.
+- Hidden unless `--all`: sessions with no user prompt (hook and probe runs) and sessions already on the board.
+- `words`: case-insensitive, every word must appear in title, dir, branch or ID.
+- `fleet adopt [--name N] [--dir D] [--force] [profile] <id | words...>`: the profile is optional (suggested one is used). An exact ID or a unique ID prefix of at least 8 characters adopts that session; otherwise the words search, leaving out sessions in use or on the board. One match is adopted, none or several is an error that lists up to 5 candidates. A positional dir after an exact ID still works.
+- MCP: `fleet_sessions` (optional `query`, `limit`) returns one line per session; `fleet_adopt` takes `session_id` or `query`, `profile` optional. Supervisor rule: on "adopt my X session" call `fleet_sessions` with the user's words, ask which one if more than one, then `fleet_adopt` with the ID.
+- Reading is bounded: only the newest sessions are opened, and at most the first 256 KB of a transcript is read.
+- In use = a live Copilot `inuse.<pid>.lock`, or a process with the ID as a whole argument (tmux and screen servers are ignored: they keep the command they were started with).
+- Built 2026-11-04.
+- Out of scope: a TUI picker, agy and vibe stores.
 
 ### Status detection
 
@@ -129,11 +201,20 @@ Status is read from the bottom of the pane each poll (every 1–2 seconds):
 | Status | Signal |
 |---|---|
 | working | pane text changed since the last poll, or the tool's spinner or "thinking" marker is visible |
-| waiting | approval prompt, y/n prompt or an empty input box after a finished turn (one pattern per tool) |
+| waiting | approval prompt, y/n prompt or question form (one pattern set per tool) |
 | error | error banner, crashed process or non-zero exit |
 | stuck | working, but the pane hash hasn't changed for N minutes (default 10) |
-| idle | turn finished and nothing new asked for, longer than M minutes |
+| idle | turn finished: empty input box and the tool's idle footer, nothing asked |
 | parked | no process; resumes on demand |
+
+How the patterns are applied (`internal/status`, per-tool sets in `patterns.toml` with keys `waiting`, `error`, `working`, `idle`, `transcript`):
+
+- Only the last 14 non-empty lines are read: enough for a question form or approval box plus the footer under it.
+- **waiting wins anywhere in that window.** A Copilot approval box ("Do you want to run this command?", "↑/↓ to navigate · enter to select · esc to cancel") or question form ("Copilot needs information.", "↑/↓ select · enter accept …") can sit above a footer that still says "Working". The line matched by the first `waiting` pattern in list order becomes `waiting_for` (with the question under "needs information." appended).
+- `transcript` marks lines of the scrolling conversation (Copilot: lines ending in the right-hand scrollbar `┃`). A waiting pattern there only counts on the transcript's last content line, so prompt text an agent quoted earlier in its work doesn't make it look blocked.
+- Otherwise the **bottom-most** line matching `error`, `working` or `idle` decides — normally the tool's footer. Copilot: busy is "● Working · … esc esc interrupt"; idle is the mode footer ("Interactive · Allow All · / commands · space hold to record") without "Working". Picker hints like "esc to cancel" mean waiting, never working.
+- tmux's "Pane is dead (status …)" banner, or a dead pane, is always `error`.
+- `fleet refresh` tags the pane (`@fleet_status`, shown in the pane title) on every transition, and re-syncs the tag whenever it differs from the board.
 
 Hooks are better where they exist. Claude Code and Copilot can run hooks on events such as "turn finished" and "needs permission". Those hooks can write status straight to the board, which is more reliable than scraping. Use scraping as the fallback that works with every tool.
 
@@ -197,7 +278,7 @@ The bottom tmux status line and the overview header show a short hint in plain w
 
 - **`Alt-?`** anywhere in the fleet tmux server opens a popup (`tmux display-popup`) with every hotkey, grouped by area (panes, wall, supervisor, overview), one line each. Any key closes it. `fleet keys` prints the same list in a terminal.
 - **`?`** in the overview opens the same list as an overlay; `q`, `Esc` or `?` closes it.
-- One registry (`internal/keys`) is the single source of truth: the status hint, the overview hint, the popup, the overlay, `fleet keys` and the generated table below come from it. Tests fail if a tmux `M-*` binding in `fleet up` is missing from the registry (or the reverse), or if the table below is out of date (`fleet keys --markdown` regenerates it).
+- One registry (`internal/keys`) is the single source of truth: the status hint, the overview hint, the popup, the overlay, `fleet keys` and the generated table below come from it. Tests fail if a tmux `M-*` or `fleetwall` chord binding in `fleet up` is missing from the registry (or the reverse), or if the table below is out of date (`fleet keys --markdown` regenerates it).
 
 <!-- keys:begin -->
 | Group | Key | Description |
@@ -206,18 +287,19 @@ The bottom tmux status line and the overview header show a short hint in plain w
 | Panes | `Alt-z` | zoom this pane; press again to restore |
 | Panes | `Alt-x` | hide this pane (the agent keeps running) |
 | Panes | `Alt-o` | jump to the marked pane (right-click → Mark) |
+| Wall | `Alt-w 1/2/4/6/9/m` | same as Alt-1…9/m: Alt-w, let go, then the key |
 | Wall | `Alt-1/2/4/6/9` | wall: show up to N panes |
 | Wall | `Alt-m` | wall: one main pane + stack |
 | Supervisor | `Alt-s` | show/hide the supervisor |
 | Supervisor | `Alt-S` | move the supervisor left/right |
-| Supervisor | `Alt-R` | reset the supervisor: fresh session from notes + handoff (asks y/n) |
+| Supervisor | `Alt-R` | reset the supervisor to a fresh chat (asks y/n) |
 | Overview | `Alt-c` | overview: tiles ↔ compact chips |
 | Overview | `←↑↓→ / hjkl` | select a tile |
 | Overview | `⏎ / click` | show the selected agent on the wall |
 | Overview | `x` | take the selected agent off the wall |
 | Overview | `Tab` | jump to the next waiting agent |
 | Overview | `1/2/4/6/9/m` | same as Alt-1…9 / Alt-m |
-| Overview | `R` | same as Alt-R (reset the supervisor) |
+| Overview | `R` | same as Alt-R: reset the supervisor (asks y/n) |
 | Overview | `q` | quit the overview |
 
 `Alt-?` (tmux) · `?` (overview): show this list.
@@ -254,7 +336,7 @@ Everything sits in one tmux window, so one terminal window fills the monitor:
 - Each agent's pane lives in a hidden tmux window when it isn't on the wall.
 - Clicking a tile in the overview (or pressing `Enter`) moves that agent's pane onto the wall with `tmux join-pane`/`swap-pane`. If the wall is full, the slot used least recently goes back to its hidden window. The process keeps running throughout. Nothing restarts.
 - **Mouse:** `set -g mouse on`. Click a live pane to type into it. Drag a border to resize. Scroll to read history. Click an overview tile to bring that agent onto the wall.
-- **Tiling layouts**, chosen from the keyboard or the status bar: `1` one large pane; `2` side by side; `4` a 2×2; `6` a 3×2; `9` a 3×3; `M` main + stack (one large pane plus a column of small ones). Built from tmux's own layouts (`main-vertical`, `tiled`) plus saved custom layout strings.
+- **Tiling layouts**, chosen from the overview (`1 2 4 6 9 m`), globally with `Alt+w` then the digit, or `Alt+<digit>` in terminals that don't use Alt+digit for tabs (Ptyxis and GNOME Terminal do): `1` one large pane; `2` side by side; `4` a 2×2; `6` a 3×2; `9` a 3×3; `M` main + stack (one large pane plus a column of small ones). Built from tmux's own layouts (`main-vertical`, `tiled`) plus saved custom layout strings.
 - **Pin** (`P`) keeps a pane on the wall so it is never swapped out.
 - **Zoom** (`Z`, or tmux `prefix + z`) makes one pane fill the whole wall for a moment.
 - Wall panes show a coloured border in the same colour as their tile, so status is visible in both places.
@@ -267,6 +349,61 @@ Everything sits in one tmux window, so one terminal window fills the monitor:
 - The overview redraws only the tiles that changed. Animation runs on a 10 fps timer, and only for tiles that are spinning or pulsing.
 - Agents run on a separate tmux server (`tmux -L fleet`) so my own tmux sessions and the dev loop never get mixed up with the fleet.
 - Terminal emulator: today it's a VTE-based terminal. If drawing feels slow on the big monitor with 9 busy panes, try a GPU-accelerated terminal (kitty, WezTerm, Ghostty or foot). Nothing in the design depends on which one.
+
+---
+
+## 5b. Smarter wall tiling (R4, R7, R9)
+
+The first wall was dumb in three ways: it evicted by last use alone, so a pane waiting for my answer could be thrown off the wall by a pane I had just opened; the grid shape was a fixed preset, so five panes on a 300-column monitor still drew a 2×2 and hid one; and every pane got the same size whether it was asking me a question or quietly running tests. Three rules fix that. All three are pure geometry plus pane status, so they live in `internal/layout` (shape) and `internal/wall` (which pane, which status).
+
+### 5b.1 Evict by status, not just last use
+
+When the wall is full and another pane has to come on, the pane that leaves is chosen by **class first, last use second**:
+
+| Class | Panes | Evicted |
+|---|---|---|
+| 0 | pinned (`@fleet_pin` = `1`) | never |
+| 1 | `waiting`, `error`, `stuck` | never |
+| 2 | `working` | only if no class-3 pane is left |
+| 3 | `idle`, `gone`, `unknown`, untagged | first |
+
+Within a class the least recently used pane (`@fleet_used`) goes. A pane that needs me (`waiting`) or has failed (`error`, `stuck`) is never swapped out automatically — those are exactly the panes I opened the wall to see. If every pane on the wall is protected, the new pane is **not** forced on: tmux shows `wall full: every pane is waiting or failing (M-x to free one)` and nothing moves. Pressing `M-x` (explicit hide) always works, whatever the status.
+
+Status comes from the pane itself: `fleet refresh` already tags `@fleet_status` on every transition, and now also `@fleet_status_since` (unix nanoseconds). No board read from the wall code, so state stays in tmux (ADR-1, ADR-4).
+
+Pinning (`P` in §5a) is **specified here but not built**: class 0 exists in the ordering and `@fleet_pin` is read, so the key binding is the only missing piece.
+
+**Take the slot I just left.** Eviction order is the fallback, not the first rule. When the wall is full and I bring an agent on from the overview, the pane that goes is the wall pane I was **last in** — tmux `#{pane_last}` = 1 in the main window. My focus path is almost always *wall pane → overview → `Enter`*, so the slot I just left is the slot I meant to reuse, whatever its status: an explicit `Enter` is my decision and it beats class-1 protection. The incoming pane takes that slot with `swap-pane`, so it keeps the position and size I was already looking at, nothing else on the wall moves, and the layout string doesn't change. The pane that leaves goes back to a window renamed `ag-<agent>`, as with any eviction.
+
+Two exceptions fall back to the class order above: a **pinned** last-focused pane (class 0 is never replaced, even explicitly), and a last pane that isn't a wall pane at all — if I came from the supervisor, or focus never left the overview, there is no slot to reuse.
+
+### 5b.2 A grid sized to the screen, not to the preset
+
+Presets (`M-1/2/4/6/9`) stop being fixed shapes and become **caps on the number of slots**. The shape is computed from the space actually available — the wall rectangle, not the window. On the reference 300×80 terminal that rectangle is 209×64: 300×79 after the tmux status line, minus the 90-column supervisor and its border, minus the 14-row overview and its border.
+
+- A pane should be at least `MinPaneW`×`MinPaneH` = **64×17** cells. 16 usable rows plus the one row `pane-border-status top` takes for the title. 64 columns is what an agent TUI needs before it starts wrapping badly; demanding 80 would cap the reference wall at a 2×2 and make this rule a no-op exactly where it matters.
+- Given the wall rectangle and `n` panes, every row count `r` from 1 to `n` is tried. `cols = ceil(n/r)`, and the shape scores `min(cellW/MinPaneW, cellH/MinPaneH)` — not raw area, which ignores that cells are about twice as tall as they are wide and would put five panes in one row of 41 columns. **The score is clamped at 1**: once a cell clears the minimum, extra slack is worth nothing, so a shape that fits is never beaten by a roomier one with worse proportions (without the clamp, 3 panes would tile 1+2 instead of a single row of three). Shapes that divide evenly (`n % r == 0`) get a 10% bonus *after* the clamp, so 6 panes stay 3+3 instead of going ragged. Highest score wins; ties go to fewer rows, because height is the scarce axis.
+- A score below 1 means nothing fits the minimum; the best-scoring shape is used anyway. A cramped pane beats a hidden agent. (Refusing the join below some hard floor is a later question — see §18 #15.)
+- Panes spread over the rows as evenly as possible with the remainder on the **bottom** rows, and each row fills the full width. New panes join at the end, so the ragged row is where growth happens and the rows I am already reading keep their shape. 5 panes become **2 + 3**, 7 become 2 + 2 + 3, 3 sit in a single row.
+
+`M-1` still means one pane — plus any pane that refused to leave, since a waiting or failing pane is never evicted (§5b.1) and the leftovers auto-grid. `M-m` still means main + stack. `M-9` no longer needs the `Wall9MinCols` special case: a narrow window simply cannot fit three 64-column panes and the grid falls back on its own.
+
+### 5b.3 The pane that needs attention gets the space
+
+Equal tiles are wrong when one agent is asking a question and the rest are grinding. The wall picks one **emphasis pane** and gives it `FocusPercent` = 60% of the wall; the others share the rest in an auto-grid (§5b.2):
+
+- Emphasis pane = the **longest-waiting** pane (`waiting`, then `error`/`stuck`, by `@fleet_status_since`); if none needs attention, the **active** wall pane; if neither, no emphasis and the grid is even.
+- Stacked or side by side is decided by scoring both remainders with the grid rule above, tie to stacked — on a 209×64 wall stacked gives the emphasis pane the full 209 columns and the others better shapes, while side by side leaves one cramped column.
+- The emphasis pane takes the first slot. The other panes keep their relative order: reordering them to follow focus would mean `swap-pane`, and every agent TUI would repaint and lose its scroll position.
+- Emphasis is skipped when it would push the remaining panes under the minimum pane size, or when there are fewer than two panes. With the default 14-row overview that means emphasis is off above about four wall panes — intended, not a bug.
+- **Hysteresis**, because resizing a pane makes an agent TUI reflow: emphasis moves only when its pane leaves the wall or stops needing attention, when I explicitly focus a wall pane (immediate, then held 60s), or when a candidate has waited 10s *and* the current emphasis has held 30s. The choice lives in `@fleet_emphasis_pane` / `@fleet_emphasis_at`, and a re-layout that produces the same layout string as `@fleet_layout` is skipped entirely.
+- `fleet wall emphasis` toggles it off and back on (window option `@fleet_emphasis`) for when I want a plain even grid. No key binding: the hint bar is already full, and the remaining key budget belongs to pinning.
+
+A pane that is merely `working` therefore shrinks on its own as soon as another pane starts waiting, and grows back when I answer it.
+
+### Out of scope here
+
+Adaptive overview height, auto-slotting waiting agents onto the wall (§18 #13), keeping hand-dragged pane sizes across a re-layout, and saved named walls (§5a) are all still unbuilt and unchanged by this.
 
 ---
 
@@ -293,7 +430,7 @@ Automatic version: when the supervisor's context goes red, it writes anything pe
 
 For a hard problem in one agent, open a short-lived supervisor that loads only that agent's card and raw pane. It can go deep, then updates the card and exits. The main supervisor only sees the updated card.
 
-### 6.5 Supervisor memory: notes, handoff, context meter (R11)
+### 6.5 Supervisor memory: notes, handoff, context meter (R11, §18 #14)
 
 The supervisor's chat fills up over a long day. Fleet does not compact it (ADR-4). The supervisor saves what it must not forget to disk as it goes. When its context gets full it writes a handoff and fleet replaces it with a fresh session that starts from the handoff and the board. Agents aren't affected: they live on the board and in tmux, not in the supervisor's chat.
 
@@ -432,7 +569,9 @@ Each component lives in its own Go package with its own `_test.go` file. `make t
 | tmux adapter (new window, capture, send/paste, join/swap pane, kill) | `internal/tmux` | Integration test against a throwaway tmux server: spawn `cat`, paste text, capture it back, move panes |
 | Status detector | `internal/status` | Table test over real pane captures stored in `testdata/<tool>/<state>.txt`. One file per tool per state; a tool UI change shows up as a failing case |
 | Board and cards store | `internal/board` | Unit test in a temp directory: write, read, concurrent update, broken JSON recovery |
+| Session discovery (list and search Copilot/Claude session stores for adopt) | `internal/sessions` | Unit test over fake session folders and transcripts in a temp dir: titles, filters, word search, suggested profile |
 | Tool adapters (spawn and resume command per tool, finding the session ID) | `internal/tools` | Unit test of the exact command lines; finding the session ID against a fake session folder |
+| Local spawn preferences (mode, auto-submit, extra args, local profile layer) | `internal/prefs` | Unit test in a temp directory via `FLEET_CONFIG`: missing file gives neutral defaults, `[profile.x]` beats `[defaults]`, broken TOML names the file |
 | Parking scheduler (cap, least recently used, RAM guard) | `internal/park` | Unit test with a fake clock and fake RAM readings |
 | Supervisor memory (§6.5) | `internal/supervisor` | Fill reads the last usage record from the tail of `events.jsonl`; handoff rotation keeps 20; notes format; colour band edges; reset respawns a fake supervisor on a `fleet-test-*` socket |
 | Summariser (`peek`) | `internal/summary` | Unit test with a fake model: cache hit when the pane hash is unchanged, at most 5 lines out, raw text never returned in supervisor mode |
@@ -542,6 +681,26 @@ Decision: every hotkey lives once in `internal/keys`. The tmux status hint, over
 Why: the old hint ("M-s sup · M-S side · M-1/2/4/6/9/m wall") was cryptic, and three hand-written key lists had already drifted apart.
 Rejected: `Alt-h` for help (it did not reach tmux in a live test; `Alt-?` did, and matches the overview's `?`); keeping hints hand-written next to each binding.
 
+**ADR-13: a spawned agent starts ready to work; the mode is a local preference** (R12, R15)
+Decision: `spawn` delivers the first prompt through the tool's own launch flag where one exists (`copilot -i`), and otherwise waits for a *detected-ready* pane before pasting — never a fixed sleep. Starting mode (autopilot, plan, accept-edits) is `mode_args`/`mode_keys` data on the profile, selected by a per-user file at `$XDG_CONFIG_HOME/fleet/config.toml` that the repo neither ships nor commits. Repo defaults are neutral.
+Why: the fixed 1500 ms sleep lost the first prompt outright (the TUI was not in raw mode yet), and hand-switching every new agent to autopilot was the single most repeated manual step. Keeping it in a local file keeps an opinionated, blast-radius-heavy default (`--allow-all`) out of the repo while still being one line to turn on. Keeping it as profile data means Claude Code's `--permission-mode` needs no new code.
+Rejected: raising the sleep (still a race, just a slower one); auto-answering the autopilot permission dialog with keystrokes (ADR-9 — and `--allow-all` at launch makes the dialog not appear at all); committing `autopilot = true` as a repo default.
+**ADR-14: the wall evicts by status class, and never evicts a pane that needs me** (R4, R7)
+Decision: when the wall is full, the incoming pane takes the slot of the wall pane the user was last in (`#{pane_last}`) via `swap-pane`, unless that pane is pinned or isn't a wall pane. Otherwise eviction orders panes pinned → waiting/error/stuck → working → idle/unknown and takes the least recently used pane of the worst class present. If every pane is protected, the new pane stays off the wall and tmux says so.
+Why: last-use order threw away exactly the pane I had come to answer. Status is already on the pane (`@fleet_status`), so this costs one tmux field, not a board read.
+Why the last-focused pane first: pressing `Enter` on a tile is an explicit choice, and the slot just left is the one the user is already looking at — replacing it in place avoids a re-tile and never surprises them by taking a different pane.
+Rejected: a hard LRU with a manual pin only (needs me to pin before it helps); forcing the new pane on anyway (silently loses a waiting agent); class order even for an explicit `Enter` (it would evict some other pane while the slot the user just left sits there).
+
+**ADR-15: the wall grid is computed from the window, presets are caps** (R7, R9)
+Decision: `internal/layout` picks rows and columns so every pane keeps at least 64×17 cells of the wall rectangle and the space is filled; shapes score `min(cellW/min, cellH/min)` rather than area; `M-1/2/4/6/9` only cap how many panes may be on the wall. 5 panes become 2+3.
+Why: a fixed 2×2 or 3×3 either wastes a wide monitor or crushes panes below a readable width. One rule covers every window size, and the `Wall9MinCols` special case disappears.
+Rejected: more presets (more keys, same problem); tmux's own `tiled` layout (can't keep the supervisor and overview sized, ADR-3's wall must stay one computed layout string); refusing to place a pane when the grid falls below the minimum (contradicts "cramped beats hidden" in the same rule; parked as §18 #15).
+
+**ADR-16: one emphasis pane at 60%, chosen by attention then focus** (R4, R9)
+Decision: the longest-waiting pane — or the active pane when nothing waits — gets about 60% of the wall; the rest auto-grid in the remainder. Orientation is whichever remainder grids better, tie to stacked. Skipped when it would push panes under the minimum size. Moves are damped (10s dwell, 30s hold, explicit focus wins for 60s) and an unchanged layout string is never re-applied, so agent TUIs don't reflow every time a status flips. Toggled by `fleet wall emphasis`, no key binding.
+Why: tiles of equal size spend the monitor evenly on work that needs me and work that doesn't; without the damping, resizing panes on every status change costs more than it gives.
+Rejected: zoom only (all or nothing, and hides the others); sizing every pane by status (layout churns on every status change); an `M-e` binding (the hint bar is full; the next key belongs to pinning).
+
 ---
 
 ## 16a. Lean supervisor (R11)
@@ -563,3 +722,51 @@ Source: https://code.claude.com/docs/en/best-practices (fetched 2026-11-04).
 | One agent writes, another reviews | A separate reviewer agent reads each slice's diff against this spec. The builder doesn't review its own work. |
 | Run independent work in parallel with subagents | Builder (code), designer (layout), researcher (tool sessions and hooks) run at the same time; each gets a narrow brief and reports back briefly. |
 | Course-correct early | Small commits every working piece; I watch `git log` and the running TUI and redirect the builder by message, not by restarting it. |
+
+---
+
+## 18. Review after the prototype (2026-11-04): what would make it a real agentic fleet manager
+
+State at review: about 3,900 lines of Go. Built: tmux substrate, tool profiles, scraped status, overview grid, live wall (incl. smarter tiling, §5b: status-aware eviction, screen-sized grid, emphasis pane), lean Copilot supervisor over MCP (`fleet_status/peek/send/answer/spawn/profiles/close/wall`). Missing: park/wake, summaries, workflows, worktrees, real status patterns for Claude, agy and vibe.
+
+The gap: fleet today manages **sessions**. Agentic work is about **tasks** (a goal, a place to do it, a definition of done, a result, dependencies). The supervisor can poke panes, but it has nothing to plan against and no way to know when work is actually finished.
+
+### Priority 1: needed for live testing now
+
+| # | Change | Why |
+|---|---|---|
+| 1 | ✅ built (2026-11-04, see §4) **`fleet adopt`**: bring an already-running session (copilot/claude ID + dir) under fleet by resuming it in a fleet pane | I already have many sessions open. Without this, live testing means starting over. |
+| 2 | **`fleet snap <name> <state>`**: save the current pane to `testdata/<tool>/<state>.txt` when a tile shows the wrong colour | Turns every misdetection during live testing into a test case in seconds. Fixes the "patterns are guesses" gap with real data. |
+| 3 | **Claude hooks for status** (`Stop` = turn finished, `Notification`/`PreToolUse` = needs me), writing to `~/.fleet/status/<name>.json`; scraping stays as fallback | Claude variants are most of the fleet; hooks don't break when the UI changes. |
+| 4 | **Worktree per agent by default** when the dir is a git repo: `spawn` creates `git worktree add` on branch `fleet/<name>` | Agentic work runs several agents on one repo; shared checkouts collide. |
+
+### Priority 2: tasks, not sessions
+
+| # | Change | Why |
+|---|---|---|
+| 5 | **Task card on spawn**: goal, repo, **done-check** (command + expected exit code), result file. Stored in the board. | Same rule as my loop guide: no machine-checkable done condition, no loop. Lets fleet mark a tile ✅ done only when the check passes, not when the agent says so. |
+| 6 | **Result file**: every spawned agent gets told to write `~/.fleet/agents/<name>/result.md` (what changed, branch, open questions) when it finishes | The supervisor reads results instead of screens: cheaper, and nothing gets lost when an agent is closed. |
+| 7 | **`fleet run plan.yaml`**: a small workflow file: tasks with profile, dir, prompt, done-check and `after:` dependencies. Fleet starts tasks as their dependencies finish, up to the live cap. The supervisor can write these plans via an MCP tool (`fleet_plan`). | This is the actual agentic workflow: fan out, wait, fan in. Keeps the plan on disk (ADR-4), so a supervisor reset loses nothing. |
+| 8 | **Review step as a task type**: after an implement task passes its check, fleet can spawn a reviewer agent (different profile/model) on the same worktree | Writer and reviewer separated, as in the Claude Code guide. |
+| 9 | **Recipes**: named spawn presets (`review-pr`, `implement-story`, `fix-ci`) = profile + prompt template + done-check | One keypress or one supervisor call instead of re-typing prompts. |
+
+### Priority 3: running 40 at once
+
+| # | Change | Why |
+|---|---|---|
+| 10 | **Park/wake + live cap + RAM guard** (§7) | Still the RAM fix; needed beyond about 15 real agents. |
+| 11 | **Spend per agent**: read tokens/credits from Copilot `events.jsonl` and Claude transcripts; show on the tile; optional per-task cap | Agentic workflows can burn credits silently. |
+| 12 | **Stuck rule**: same error twice or no progress for N minutes → tile red, agent paused, supervisor told | Mirrors the "same failure twice, stop" rule; stops grinding. |
+| 13 | **Waiting agents come to me**: optional auto-placement of the longest-waiting agent on the wall, plus a desktop notification | Less hunting; the wall shows what needs me. |
+| 14 | **Supervisor reset key + context tile** (§6.3, §6.5). **Built 2026-11-04:** notes, handoff, context meter, `M-R`/`R` reset (ADR-11). | The lean supervisor is cheap now, but long days still fill it. |
+| 15 | **A hard floor under the wall grid**: refuse to place one more pane (and say so) once the grid would drop every pane below a readable size, instead of tiling ever smaller | §5b.2 currently prefers a cramped pane to a hidden agent; past some point a 41×12 pane is just wrapped garbage. Needs a floor number from live use. |
+| 16 | **Pin a pane to the wall** (`M-p` / `@fleet_pin`): eviction class 0 already exists and is read, nothing sets it | §5b.1 is built around it; it is the one key binding worth spending (§5b.3 deliberately skipped `M-e`). |
+
+### Not recommended
+
+- Auto-answering approval prompts. It saves clicks but removes the gate (ADR-9). At most, an allowlist per recipe, later.
+- Agents talking to each other directly. Keep coordination through task cards and result files.
+
+### Suggested order for the next builder slices
+
+1 → 2 → 4 → 5 + 6 → 3 → 7 → 10, then the rest as live testing shows the need.

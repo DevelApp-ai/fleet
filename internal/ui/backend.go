@@ -7,10 +7,11 @@ import "github.com/sturlabragason/fleet/internal/board"
 type Backend interface {
 	Refresh() ([]*board.Agent, error)
 	OnWall() map[string]bool
-	Show(name string) error // bring onto the live wall
-	Preset(p string) error  // wall layout 1/2/4/6/9/m
-	Hide(name string) error // send back to its hidden window
+	Show(name string) (bool, error) // onto the live wall; false = refused (wall full)
+	Preset(p string) error          // wall layout 1/2/4/6/9/m
+	Hide(name string) error         // send back to its hidden window
 	WallEnabled() bool
+	ApplyWall() error // re-tile after a refresh (cheap; cached layout)
 	// SupCtx is the supervisor context meter: label ("34%") and colour,
 	// both "" when the fill is unknown.
 	SupCtx() (label, color string)

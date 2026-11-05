@@ -1,0 +1,7 @@
+ ● I need a decision before going further.                              ┃
+                                                                        ┃
+ ○ Asking user  Waiting for response                                    ┃
+                                                                        ┃
+ ~/git/fleet         [⎇ main]                   Session: 100.00 AIC used
+ Autopilot · Allow All · ● Working · 32.6 KiB esc esc interrupt
+ctx ███░░░░░ 39% (77k/200k)  pool ████░░░░ 54% (6.6/12G)

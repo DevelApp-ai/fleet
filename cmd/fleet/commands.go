@@ -12,6 +12,8 @@ import (
 	"github.com/sturlabragason/fleet/internal/fake"
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/mcp"
+	"github.com/sturlabragason/fleet/internal/prefs"
+	"github.com/sturlabragason/fleet/internal/sessions"
 	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
@@ -21,6 +23,11 @@ const usage = `usage:
   fleet ui                                  run the overview TUI in this terminal
   fleet spawn <name> <profile> [dir] ["prompt"]
   fleet spawn --fake <name> [dir]           shorthand for profile "fake"
+  fleet adopt [--name N] [--dir D] [--force] [profile] <id | words...>
+                                            resume an existing session (started outside fleet) as an agent;
+                                            by ID, unique ID prefix (8+ chars) or words from fleet sessions
+  fleet sessions [--all] [--json] [-n 20] [words...]
+                                            list copilot/claude sessions to adopt, newest first
   fleet ls [--json]
   fleet send <name> "text"
   fleet peek <name> [--raw] [-n 200]
@@ -30,8 +37,12 @@ const usage = `usage:
   fleet supervisor reset [--handoff]        replace the supervisor with a fresh session (M-R)
   fleet note [--agent NAME] "text"          append a note to ~/.fleet/decisions.log
   fleet profiles                            list tool profiles (~/.fleet/tools.toml)
-  fleet wall <layout|show NAME>             wall control (used by tmux key bindings)
-  fleet keys [--markdown]                   list every hotkey (Alt-? in tmux, ? in the overview)`
+  fleet wall <apply|refresh|preset N|show NAME|emphasis>   wall control (used by tmux key bindings)
+  fleet keys [--markdown]                   list every hotkey (Alt-? in tmux, ? in the overview)
+
+local preferences (never committed): ~/.config/fleet/config.toml ($FLEET_CONFIG overrides)
+  sets the starting mode (e.g. copilot autopilot), extra args and prompt auto-submit;
+  see examples/config.toml.example`
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -56,6 +67,10 @@ func run(args []string) error {
 	switch cmd {
 	case "spawn":
 		return cmdSpawn(f, rest)
+	case "adopt":
+		return cmdAdopt(f, rest)
+	case "sessions":
+		return cmdSessions(f, rest)
 	case "ls":
 		return cmdLs(f, rest)
 	case "send":
@@ -75,8 +90,10 @@ func run(args []string) error {
 	case "profiles":
 		for _, n := range tools.Names(f.Profiles) {
 			p := f.Profiles[n]
-			fmt.Printf("%-16s %s  (patterns=%s)\n", n, strings.Join(p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", ID: "<id>"}, false), " "), p.Patterns)
+			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", ID: "<id>"}, tools.Launch{})
+			fmt.Printf("%-16s %s  (patterns=%s)\n", n, strings.Join(argv, " "), p.Patterns)
 		}
+		fmt.Printf("\nprofiles: built-in + %s + [profile.*] in %s\n", tools.Path(f.Home), prefs.Path())
 		return nil
 	case "supervisor":
 		return cmdSupervisor(f, rest)
@@ -129,6 +146,84 @@ func cmdSpawn(f *fleet.Fleet, args []string) error {
 	}
 	fmt.Printf("spawned %s (%s) in %s pane %s\n", ag.Name, ag.Profile, ag.Dir, ag.PaneID)
 	return nil
+}
+
+func cmdAdopt(f *fleet.Fleet, args []string) error {
+	fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
+	name := fs.String("name", "", "agent name (default: base name of dir)")
+	dir := fs.String("dir", "", "working dir (default: the session's)")
+	force := fs.Bool("force", false, "skip the session-exists and in-use checks")
+	a, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(a) == 0 {
+		return fmt.Errorf("usage: fleet adopt [--name N] [--dir D] [--force] [profile] <id | words...>")
+	}
+	ag, err := f.AdoptArgs(fleet.AdoptOpts{Name: *name, Dir: *dir, Force: *force}, a)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("adopted %s (%s) session %s in %s pane %s\n", ag.Name, ag.Profile, ag.SessionID, ag.Dir, ag.PaneID)
+	return nil
+}
+
+func cmdSessions(f *fleet.Fleet, args []string) error {
+	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
+	all := fs.Bool("all", false, "include sessions with no prompt and ones on the board")
+	asJSON := fs.Bool("json", false, "JSON output")
+	n := fs.Int("n", 20, "max sessions (0 = all)")
+	words, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	ss, err := f.Sessions(sessions.Opts{Words: words, All: *all, Limit: *n})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		e := json.NewEncoder(os.Stdout)
+		e.SetIndent("", "  ")
+		if ss == nil {
+			ss = []sessions.Session{}
+		}
+		return e.Encode(ss)
+	}
+	home, _ := os.UserHomeDir()
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "AGE\tPROFILE\tDIR\tTITLE\tID\tFLAGS")
+	for _, s := range ss {
+		d := s.Dir
+		if home != "" && (d == home || strings.HasPrefix(d, home+"/")) {
+			d = "~" + d[len(home):]
+		}
+		if r := []rune(d); len(r) > 40 {
+			d = "…" + string(r[len(r)-39:])
+		}
+		var flags []string
+		if s.InUse {
+			flags = append(flags, "in use")
+		}
+		if s.OnBoard {
+			flags = append(flags, "on board")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", sessions.Age(time.Since(s.Updated)), s.Profile, d, sessions.OneLine(s.Title, 60), sessions.Short(s.ID), strings.Join(flags, ", "))
+	}
+	return w.Flush()
+}
+
+// parseInterleaved parses flags that may come before, between or after positionals.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return pos, nil
+		}
+		pos, args = append(pos, fs.Arg(0)), fs.Args()[1:]
+	}
 }
 
 func cmdLs(f *fleet.Fleet, args []string) error {

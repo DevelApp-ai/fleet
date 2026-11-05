@@ -1,0 +1,49 @@
+# fleet local preferences — EXAMPLE
+#
+# Copy to ~/.config/fleet/config.toml (or $XDG_CONFIG_HOME/fleet/config.toml,
+# or point $FLEET_CONFIG at it). The real file lives outside the repo and is
+# never committed: it holds your opinionated defaults, not the project's.
+#
+# Everything here is optional. With no file at all, fleet spawns agents in
+# whatever mode the tool itself defaults to.
+
+[defaults]
+# Starting mode, looked up in the profile's mode_args / mode_keys.
+# "" (or omitted) leaves the tool alone. An unknown mode is logged and ignored.
+mode = ""
+# Press Enter after a pasted first prompt. Setting this to false also turns off
+# launch-time delivery (`copilot -i <prompt>` submits the prompt itself), so the
+# prompt is pasted into the input box and left there for you.
+auto_submit = true
+# How long to wait for the tool's TUI to start accepting input before pasting
+# anyway. Spawn polls the pane rather than sleeping a fixed amount. Spawn blocks
+# for up to this long, including the fleet_spawn MCP call, so keep it modest.
+ready_timeout = "15s"
+
+[profile.copilot]
+# WARNING: "autopilot" for Copilot launches `--allow-all --autopilot`.
+# The agent then runs every tool call without asking. Opt in deliberately.
+# (`--autopilot` on its own opens a blocking permission dialog, which is why
+# --allow-all is part of the mode.)
+mode = "autopilot"
+extra_args = ["--reasoning-effort", "high"]
+
+[profile.claude]
+# "accept-edits", "plan" or "bypass" -> claude --permission-mode ...
+mode = "accept-edits"
+
+# A [profile.<name>] section is also a third override layer for tool profiles,
+# after the built-ins and ~/.fleet/tools.toml. It accepts every tools.toml key,
+# so you can define a new profile without touching the repo.
+# A section that neither names an existing profile nor sets `command` is ignored
+# with a warning — a typo like [profile.coplot] cannot create a dead profile.
+[profile.my-copilot]
+command = "copilot"
+args = ["--model", "claude-opus-5"]
+patterns = "copilot"
+mode = "autopilot"
+# mode_args / mode_keys are inline tables of SPACE-SEPARATED strings, not of
+# arrays: fleet's TOML subset types an inline table as string -> string and
+# splits each value on whitespace. Limitation: an argument that itself contains
+# a space cannot be written this way; put it in `args` or `extra_args`.
+mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan" }

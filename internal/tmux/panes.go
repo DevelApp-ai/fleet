@@ -73,9 +73,13 @@ type PaneInfo struct {
 	Width, Height          int
 	Used                   int64  // @fleet_used
 	Role                   string // @role
+	Status                 string // @fleet_status
+	StatusSince            int64  // @fleet_status_since (unix nanoseconds)
+	Pin                    bool   // @fleet_pin == "1"
+	Last                   bool   // #{pane_last}: the pane focus came from
 }
 
-const paneFmt = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{@fleet_agent}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{@fleet_used}\t#{@role}"
+const paneFmt = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{@fleet_agent}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{@fleet_used}\t#{@role}\t#{@fleet_status}\t#{@fleet_status_since}\t#{@fleet_pin}\t#{pane_last}"
 
 // ListPanes lists panes; target "" means all (-a), otherwise -t target (a window).
 func (c *Client) ListPanes(target string) ([]PaneInfo, error) {
@@ -98,7 +102,21 @@ func (c *Client) ListPanes(target string) ([]PaneInfo, error) {
 		w, _ := strconv.Atoi(f[7])
 		h, _ := strconv.Atoi(f[8])
 		u, _ := strconv.ParseInt(f[9], 10, 64)
-		ps = append(ps, PaneInfo{ID: f[0], Session: f[1], WindowID: f[2], Window: f[3], Agent: f[4], Dead: f[5] == "1", Cmd: f[6], Width: w, Height: h, Used: u, Role: f[10]})
+		p := PaneInfo{ID: f[0], Session: f[1], WindowID: f[2], Window: f[3], Agent: f[4], Dead: f[5] == "1", Cmd: f[6], Width: w, Height: h, Used: u, Role: f[10]}
+		// Fields appended after @role stay optional so short lines still parse.
+		if len(f) > 11 {
+			p.Status = f[11]
+		}
+		if len(f) > 12 {
+			p.StatusSince, _ = strconv.ParseInt(f[12], 10, 64)
+		}
+		if len(f) > 13 {
+			p.Pin = f[13] == "1"
+		}
+		if len(f) > 14 {
+			p.Last = f[14] == "1"
+		}
+		ps = append(ps, p)
 	}
 	return ps, nil
 }

@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/prefs"
 	"github.com/sturlabragason/fleet/internal/status"
 	"github.com/sturlabragason/fleet/internal/tmux"
 	"github.com/sturlabragason/fleet/internal/tools"
@@ -37,6 +39,8 @@ type Fleet struct {
 	Exe      string
 	Profiles map[string]tools.Profile
 	Patterns status.Sets
+	// Prefs are the local, uncommitted spawn preferences (ADR-13).
+	Prefs *prefs.Prefs
 }
 
 // Open builds a Fleet on the default socket and ~/.fleet.
@@ -51,18 +55,23 @@ func Open() (*Fleet, error) {
 
 // New builds a Fleet from parts (used by tests).
 func New(t *tmux.Client, home, exe string) (*Fleet, error) {
-	ps, err := tools.Load(home)
+	pr, err := prefs.Load()
+	if err != nil {
+		// A broken local file must not make fleet unusable; log and carry on.
+		logx.For("fleet").Error("config.toml", "err", err)
+		pr = nil
+	}
+	ps, err := tools.LoadWith(home, pr.ToolsDoc())
 	if err != nil {
 		return nil, err
 	}
-	return &Fleet{T: t, Store: board.NewStore(home), Home: home, Exe: exe, Profiles: ps, Patterns: status.Load(home)}, nil
+	return &Fleet{T: t, Store: board.NewStore(home), Home: home, Exe: exe, Profiles: ps, Patterns: status.Load(home), Prefs: pr}, nil
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`)
 
 // Spawn starts an agent in its own hidden window.
 func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
-	log := logx.For("fleet")
 	if !nameRe.MatchString(name) {
 		return nil, fmt.Errorf("bad name %q", name)
 	}
@@ -85,7 +94,42 @@ func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
 	if len(p.LaunchID) > 0 {
 		id = tools.NewUUID()
 	}
-	argv := p.Argv(tools.Vars{Fleet: f.Exe, Name: name, ID: id}, false)
+	pr := f.Prefs.For(profile)
+	if !p.HasMode(pr.Mode) {
+		logx.For("fleet").Warn("unknown mode for profile; ignoring", "agent", name, "profile", profile, "mode", pr.Mode)
+		pr.Mode = ""
+	}
+	argv, embedded := p.Argv(tools.Vars{Fleet: f.Exe, Name: name, ID: id},
+		tools.Launch{Mode: pr.Mode, Extra: pr.ExtraArgs, Prompt: prompt, NoPromptArgs: !pr.AutoSubmit})
+	a, err := f.start(name, profile, p, dir, prompt, id, argv)
+	if err != nil {
+		return nil, err
+	}
+	f.autostart(f.T, time.Sleep, a.PaneID, p, pr, prompt, embedded)
+	return a, nil
+}
+
+// redactArgv replaces an embedded first prompt with a placeholder so the whole
+// prompt does not end up in ~/.fleet/logs/fleet.log on every spawn.
+func redactArgv(argv []string, prompt string) []string {
+	if prompt == "" {
+		return argv
+	}
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		if strings.Contains(a, prompt) {
+			out[i] = fmt.Sprintf("<prompt:%d bytes>", len(prompt))
+			continue
+		}
+		out[i] = a
+	}
+	return out
+}
+
+// start runs argv in a new hidden agent window, tags the pane and writes the
+// board entry. Shared by Spawn and Adopt.
+func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, id string, argv []string) (*board.Agent, error) {
+	log := logx.For("fleet")
 	pane, err := f.T.Spawn(Session, WindowPrefix+name, dir, p.EnvList(), tools.ShellCommand(argv))
 	if err != nil {
 		log.Error("spawn failed", "agent", name, "err", err)
@@ -96,15 +140,16 @@ func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
 	f.T.SetPaneOption(pane, "remain-on-exit", "on")
 	f.T.Run("set-option", "-s", "-t", Session, "escape-time", "10")
 	f.T.Run("set-option", "-g", "mouse", "on")
-	a := &board.Agent{Name: name, Profile: profile, Patterns: p.Patterns, Dir: dir, Goal: prompt, SessionID: id,
-		PaneID: pane, Status: string(status.Unknown), Created: time.Now(), StatusSince: time.Now(), LastChange: time.Now()}
-	err = f.Store.Update(func(b *board.Board) error { b.Agents[name] = a; return nil })
-	log.Info("spawned", "agent", name, "profile", profile, "dir", dir, "pane", pane, "session_id", id, "argv", argv)
-	if prompt != "" {
-		time.Sleep(1500 * time.Millisecond)
-		f.T.Paste(pane, prompt, true)
+	now := time.Now()
+	a := &board.Agent{Name: name, Profile: profile, Patterns: p.Patterns, Dir: dir, Goal: goal, SessionID: id,
+		PaneID: pane, Status: string(status.Unknown), Created: now, StatusSince: now, LastChange: now}
+	if err := f.Store.Update(func(b *board.Board) error { b.Agents[name] = a; return nil }); err != nil {
+		f.T.KillPane(pane)
+		log.Error("board write failed", "agent", name, "err", err)
+		return nil, err
 	}
-	return a, err
+	log.Info("started", "agent", name, "profile", profile, "dir", dir, "pane", pane, "session_id", id, "argv", redactArgv(argv, goal))
+	return a, nil
 }
 
 // paneOf finds the live pane for an agent by its @fleet_agent tag.

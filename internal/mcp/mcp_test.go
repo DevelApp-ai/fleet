@@ -8,12 +8,14 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/tmux"
+	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
@@ -22,6 +24,8 @@ func TestRoundTrip(t *testing.T) {
 	tc := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
 	t.Cleanup(func() { tc.KillServer() })
 	os.WriteFile(filepath.Join(home, "tools.toml"), []byte("[yn]\ncommand = \"sh\"\nargs = [\"-c\", \"printf 'Approve? [y/n] '; cat\"]\npatterns = \"fake\"\n"), 0o644)
+	// Keep the user's real ~/.config/fleet/config.toml out of the test.
+	t.Setenv("FLEET_CONFIG", filepath.Join(home, "no-config.toml"))
 	f, err := fleet.New(tc, home, "/nonexistent")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +59,7 @@ func TestRoundTrip(t *testing.T) {
 	for _, tl := range list["result"].(map[string]any)["tools"].([]any) {
 		names += tl.(map[string]any)["name"].(string) + " "
 	}
-	for _, want := range []string{"fleet_status", "fleet_peek", "fleet_send", "fleet_answer", "fleet_spawn", "fleet_profiles", "fleet_close", "fleet_wall", "fleet_note", "fleet_brief", "fleet_handoff"} {
+	for _, want := range []string{"fleet_status", "fleet_peek", "fleet_send", "fleet_answer", "fleet_spawn", "fleet_sessions", "fleet_adopt", "fleet_profiles", "fleet_close", "fleet_wall", "fleet_note", "fleet_brief", "fleet_handoff"} {
 		if !strings.Contains(names, want) {
 			t.Errorf("missing tool %s", want)
 		}
@@ -85,6 +89,45 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if _, isErr := text(call(6, "tools/call", map[string]any{"name": "fleet_close", "arguments": map[string]any{"name": "a1"}})); !isErr {
 		t.Error("unconfirmed close must be refused")
+	}
+	if msg, isErr := text(call(8, "tools/call", map[string]any{"name": "fleet_adopt", "arguments": map[string]any{"profile": "fake", "session_id": "abcdefgh"}})); !isErr || !strings.Contains(msg, "can't resume") {
+		t.Errorf("adopt: %v %q", isErr, msg)
+	}
+	for _, args := range []map[string]any{{}, {"session_id": "abcdefgh", "query": "x"}} {
+		if msg, isErr := text(call(9, "tools/call", map[string]any{"name": "fleet_adopt", "arguments": args})); !isErr || !strings.Contains(msg, "exactly one of session_id or query") {
+			t.Errorf("adopt %v: %v %q", args, isErr, msg)
+		}
+	}
+	// fleet_sessions on a temp store only (never the real ~/.copilot or ~/.claude*).
+	sess := filepath.Join(home, "sessions")
+	for n, p := range f.Profiles {
+		p.SessionPath = ""
+		f.Profiles[n] = p
+	}
+	f.Profiles["rs"] = tools.Profile{Name: "rs", Command: "sh", Resume: []string{"{id}"}, SessionPath: sess + "/{id}"}
+	sd := filepath.Join(sess, "mcpsess-0001")
+	os.MkdirAll(sd, 0o755)
+	os.WriteFile(filepath.Join(sd, "workspace.yaml"), []byte("cwd: "+home+"\nname: Portal nav\n"), 0o644)
+	os.WriteFile(filepath.Join(sd, "events.jsonl"), []byte(`{"type":"user.message","data":{"content":"go"}}`+"\n"), 0o644)
+	if msg, isErr := text(call(10, "tools/call", map[string]any{"name": "fleet_sessions", "arguments": map[string]any{"query": "nav"}})); isErr || !strings.Contains(msg, "mcpsess-0001 | ") || !strings.Contains(msg, "| rs | ") || !strings.Contains(msg, "Portal nav") {
+		t.Errorf("sessions: %v %q", isErr, msg)
+	}
+	if msg, isErr := text(call(11, "tools/call", map[string]any{"name": "fleet_adopt", "arguments": map[string]any{"query": "nothing-here"}})); !isErr || !strings.Contains(msg, "no session matches") {
+		t.Errorf("adopt query: %v %q", isErr, msg)
+	}
+	// Claude-style store: adopt by padded query and by padded id lands in the transcript's cwd.
+	cwd := t.TempDir()
+	pd := filepath.Join(home, "projects", "-p")
+	os.MkdirAll(pd, 0o755)
+	f.Profiles["cl"] = tools.Profile{Name: "cl", Command: "sh", Args: []string{"-c", "cat"}, Resume: []string{"{id}"}, SessionPath: home + "/projects/*/{id}.jsonl"}
+	for i, id := range []string{"ffff6666-0000-0000-0000-000000000001", "ffff6666-0000-0000-0000-000000000002"} {
+		os.WriteFile(filepath.Join(pd, id+".jsonl"), []byte(`{"type":"user","cwd":"`+cwd+`","message":{"content":"grafana `+[]string{"alpha", "beta"}[i]+`"}}`+"\n"), 0o644)
+	}
+	for i, args := range []map[string]any{{"query": "  grafana   alpha ", "session_id": "  "}, {"session_id": " ffff6666-0000-0000-0000-000000000002 ", "query": ""}} {
+		args["name"] = "cl" + strconv.Itoa(i)
+		if msg, isErr := text(call(12+i, "tools/call", map[string]any{"name": "fleet_adopt", "arguments": args})); isErr || !strings.Contains(msg, "in "+cwd) {
+			t.Errorf("adopt claude %v: %v %q", args, isErr, msg)
+		}
 	}
 	if r := call(7, "nope", nil); r["error"] == nil {
 		t.Error("want method not found")

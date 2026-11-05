@@ -1,5 +1,6 @@
 /bin/
 /.dev/
 /dist/
+/.work/
 .env
 *.local.toml

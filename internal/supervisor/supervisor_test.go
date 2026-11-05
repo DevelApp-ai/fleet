@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sturlabragason/fleet/internal/theme"
 )
 
 func writeEvents(t *testing.T, home, id, body string) {
@@ -135,13 +137,13 @@ func TestHandoffRotationKeeps20(t *testing.T) {
 
 func TestBandEdges(t *testing.T) {
 	t.Setenv("FLEET_SUP_HANDOFF_PCT", "")
-	for pct, want := range map[int]string{0: ColorGreen, 39: ColorGreen, 40: ColorYellow, 69: ColorYellow, 70: ColorRed, 100: ColorRed} {
+	for pct, want := range map[int]string{0: theme.Green, 39: theme.Green, 40: theme.Yellow, 69: theme.Yellow, 70: theme.Red, 100: theme.Red} {
 		if got := Band(pct); got != want {
 			t.Errorf("%d: %s want %s", pct, got, want)
 		}
 	}
 	t.Setenv("FLEET_SUP_HANDOFF_PCT", "60")
-	if Band(59) != ColorYellow || Band(60) != ColorRed || Threshold() != 60 {
+	if Band(59) != theme.Yellow || Band(60) != theme.Red || Threshold() != 60 {
 		t.Error("threshold from env")
 	}
 }

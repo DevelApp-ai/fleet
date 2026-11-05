@@ -21,6 +21,7 @@ type Wall struct {
 	T      *tmux.Client
 	Target string // e.g. "fleet:main"
 	Cfg    layout.Config
+	Now    func() time.Time // clock for the emphasis hysteresis (default time.Now)
 }
 
 // New returns a wall for session:main.
@@ -79,8 +80,18 @@ func (w *Wall) Read() (*State, error) {
 	return s, nil
 }
 
-// Apply recomputes and applies the full layout (never `tiled`).
-func (w *Wall) Apply() error {
+// Apply recomputes and applies the full layout (never `tiled`), ignoring the
+// `@fleet_layout` cache. Explicit `fleet wall ...` commands and the tmux hooks
+// use this: `mouse on` lets the user drag borders and tmux clamps sizes after
+// select-layout, so the real layout drifts from the cached string and a cached
+// apply would wedge the wall in the drifted shape forever.
+func (w *Wall) Apply() error { return w.apply(true) }
+
+// ApplyCached is Apply for the hot path (the TUI refresh loop): it skips the
+// whole tmux round trip when the rendered layout equals `@fleet_layout`.
+func (w *Wall) ApplyCached() error { return w.apply(false) }
+
+func (w *Wall) apply(force bool) error {
 	s, err := w.Read()
 	if err != nil {
 		return err
@@ -89,20 +100,68 @@ func (w *Wall) Apply() error {
 	for _, p := range s.Wall {
 		ids = append(ids, p.ID)
 	}
-	lay, leaves := s.Cfg.Render(layout.Input{W: s.W, H: s.H, Sup: s.Sup, Ov: s.Ov, Wall: ids, Preset: s.Preset})
+	lay, leaves := s.Cfg.Render(layout.Input{W: s.W, H: s.H, Sup: s.Sup, Ov: s.Ov, Wall: ids, Preset: s.Preset, Focus: w.emphasis(s)})
+	// An unchanged layout is never re-applied: agent TUIs reflow on every resize.
+	if !force && lay == w.opt("@fleet_layout") {
+		return nil
+	}
+	// The TUI poll loop, the tmux hooks and `fleet wall ...` are separate
+	// processes: two reorders from independent snapshots would scramble pane
+	// order. Whoever holds the lock wins; the loser's state is stale anyway.
+	if !w.lock() {
+		return nil
+	}
+	defer w.unlock()
 	w.reorder(leaves)
 	if _, err := w.T.Run("select-layout", "-t", w.Target, lay); err != nil {
 		logx.For("wall").Error("select-layout", "layout", lay, "err", err)
 		return err
 	}
+	w.setOpt("@fleet_layout", lay)
 	if s.Sup != "" {
 		w.T.Run("resize-pane", "-t", s.Sup, "-x", strconv.Itoa(s.Cfg.SupCols(s.W)))
 	}
 	return nil
 }
 
-// reorder swaps panes so window order matches layout leaf order.
+// lock takes the apply lock, a window option holding the owner's deadline. It
+// returns false when another process holds it. A stale lock (an apply that
+// crashed) expires after applyLockTTL.
+func (w *Wall) lock() bool {
+	now := w.now()
+	if v := w.opt("@fleet_applying"); v != "" {
+		if until, err := strconv.ParseInt(v, 10, 64); err == nil && now.UnixNano() < until {
+			return false
+		}
+	}
+	w.setOpt("@fleet_applying", strconv.FormatInt(now.Add(applyLockTTL).UnixNano(), 10))
+	return true
+}
+
+func (w *Wall) unlock() { w.setOpt("@fleet_applying", "") }
+
+// applyLockTTL bounds how long a crashed apply can block the next one.
+const applyLockTTL = 5 * time.Second
+
+// reorder swaps panes so window order matches layout leaf order. A chain of
+// `swap-pane -d` can leave the focus on a different pane, and emphasis follows
+// the active pane, so without restoring it the wall re-tiles itself forever.
+// The restore is deliberately narrow — it only fires when the focus both
+// started and ended on panes this call swapped — because a select-pane that
+// fought a concurrent focus change would also rewrite `#{pane_last}`, the
+// input to "take the slot I just left" (§5b.1).
 func (w *Wall) reorder(want []string) {
+	before, _ := w.T.Run("display-message", "-p", "-t", w.Target, "#{pane_id}")
+	before = strings.TrimSpace(before)
+	swapped := map[string]bool{}
+	defer func() {
+		after, _ := w.T.Run("display-message", "-p", "-t", w.Target, "#{pane_id}")
+		after = strings.TrimSpace(after)
+		if before == "" || after == before || !swapped[before] || !swapped[after] {
+			return
+		}
+		w.T.Run("select-pane", "-t", before)
+	}()
 	panes, _ := w.T.ListPanes(w.Target)
 	cur := make([]string, len(panes))
 	for i, p := range panes {
@@ -117,6 +176,7 @@ func (w *Wall) reorder(want []string) {
 			continue
 		}
 		w.T.Run("swap-pane", "-d", "-s", cur[i], "-t", id)
+		swapped[cur[i]], swapped[id] = true, true
 		cur[i], cur[j] = cur[j], cur[i]
 	}
 }
@@ -131,25 +191,40 @@ func index(l []string, s string) int {
 }
 
 // Show brings an agent pane onto the wall (evicting the least recently used).
-func (w *Wall) Show(pane string) error {
+// It reports whether the pane ended up on the wall: false with a nil error is
+// the normal "wall full, nothing evictable" refusal.
+func (w *Wall) Show(pane string) (bool, error) {
 	log := logx.For("wall")
 	s, err := w.Read()
 	if err != nil {
-		return err
+		return false, err
 	}
 	now := strconv.FormatInt(time.Now().UnixNano(), 10)
 	for _, p := range s.Wall {
 		if p.ID == pane {
 			w.T.SetPaneOption(pane, "@fleet_used", now)
 			_, err := w.T.Run("select-pane", "-t", pane)
-			return err
+			return true, err
 		}
 	}
-	slots := s.Cfg.Slots(s.Preset, s.W)
+	slots := s.Cfg.Slots(s.Preset)
+	// First rule: take the slot I just left (DESIGN.md §5b.1). A swap keeps the
+	// exact position and size, so nothing else on the wall moves.
+	if len(s.Wall) >= slots {
+		if last, ok := ReplaceSlot(s.Wall); ok {
+			return w.swapInto(pane, last, now)
+		}
+	}
 	for len(s.Wall) >= slots {
-		lru := LRU(s.Wall)
-		w.breakOut(lru)
-		s.Wall = remove(s.Wall, lru)
+		id, ok := EvictCandidate(s.Wall)
+		if !ok {
+			// Everything on the wall needs me: leave it alone and say so.
+			w.T.Run("display-message", "-t", w.Target, FullMsg)
+			log.Info("wall full, nothing evictable", "pane", pane, "slots", slots)
+			return false, nil
+		}
+		w.breakOut(id)
+		s.Wall = remove(s.Wall, id)
 	}
 	target := s.Ov
 	if len(s.Wall) > 0 {
@@ -157,25 +232,21 @@ func (w *Wall) Show(pane string) error {
 	}
 	if _, err := w.T.Run("join-pane", "-d", "-s", pane, "-t", target); err != nil {
 		if _, err2 := w.T.Run("join-pane", "-d", "-s", pane, "-t", s.Sup); err2 != nil {
-			return err
+			return false, err
 		}
 	}
 	w.T.SetPaneOption(pane, "@role", "wall")
 	w.T.SetPaneOption(pane, "@fleet_used", now)
 	log.Info("on wall", "pane", pane, "preset", s.Preset)
 	if err := w.Apply(); err != nil {
-		return err
+		return false, err
 	}
 	_, err = w.T.Run("select-pane", "-t", pane)
-	return err
+	return true, err
 }
 
-// LRU returns the wall pane used least recently.
-func LRU(ps []tmux.PaneInfo) string {
-	c := append([]tmux.PaneInfo(nil), ps...)
-	sort.SliceStable(c, func(i, j int) bool { return c[i].Used < c[j].Used })
-	return c[0].ID
-}
+// FullMsg is shown when every wall pane is protected from eviction.
+const FullMsg = "wall full: every pane is waiting or failing (M-x to free one)"
 
 func remove(ps []tmux.PaneInfo, id string) []tmux.PaneInfo {
 	var out []tmux.PaneInfo
@@ -187,12 +258,40 @@ func remove(ps []tmux.PaneInfo, id string) []tmux.PaneInfo {
 	return out
 }
 
+// swapInto puts an incoming pane into the slot of a pane already on the wall,
+// in place: no break-pane/join-pane and no re-layout, so the geometry the user
+// was looking at is exactly preserved. The replaced pane lands in the window
+// the incoming pane came from, which is renamed after it as in breakOut.
+func (w *Wall) swapInto(incoming, slot, now string) (bool, error) {
+	if _, err := w.T.Run("swap-pane", "-d", "-s", incoming, "-t", slot); err != nil {
+		return false, err
+	}
+	w.T.SetPaneOption(incoming, "@role", "wall")
+	w.T.SetPaneOption(incoming, "@fleet_used", now)
+	w.T.SetPaneOption(slot, "@role", "agent")
+	w.T.Run("rename-window", "-t", slot, w.agentWindow(slot))
+	logx.For("wall").Info("took the slot just left", "pane", incoming, "replaced", slot)
+	// The shape is unchanged, but the pane id in that leaf is not: re-apply so
+	// @fleet_layout matches reality (with no emphasis this moves nothing).
+	if err := w.Apply(); err != nil {
+		return false, err
+	}
+	_, err := w.T.Run("select-pane", "-t", incoming)
+	return true, err
+}
+
+// agentWindow is the window name a pane belongs in when it is off the wall.
+func (w *Wall) agentWindow(pane string) string {
+	name, _ := w.T.Run("display-message", "-p", "-t", pane, "#{@fleet_agent}")
+	if name = strings.TrimSpace(name); name == "" {
+		return "loose"
+	}
+	return "ag-" + name
+}
+
 func (w *Wall) breakOut(pane string) {
 	name, _ := w.T.Run("display-message", "-p", "-t", pane, "#{@fleet_agent}")
-	win := "ag-" + name
-	if name == "" {
-		win = "loose"
-	}
+	win := w.agentWindow(pane)
 	session := strings.SplitN(w.Target, ":", 2)[0]
 	if _, err := w.T.Run("break-pane", "-d", "-s", pane, "-t", session+":", "-n", win); err == nil {
 		w.T.SetPaneOption(pane, "@role", "agent")
@@ -229,12 +328,57 @@ func (w *Wall) SetPreset(p string) error {
 	if err != nil {
 		return err
 	}
-	for slots := s.Cfg.Slots(p, s.W); len(s.Wall) > slots; {
-		lru := LRU(s.Wall)
-		w.breakOut(lru)
-		s.Wall = remove(s.Wall, lru)
+	// Shrinking evicts only evictable panes; protected panes stay even if that
+	// leaves more panes than the cap (the grid resizes to fit them).
+	slots := s.Cfg.Slots(p)
+	for len(s.Wall) > slots {
+		id, ok := EvictCandidate(s.Wall)
+		if !ok {
+			break
+		}
+		w.breakOut(id)
+		s.Wall = remove(s.Wall, id)
 	}
+	added := w.fill(s, slots)
+	logx.For("wall").Info("preset", "preset", p, "slots", slots, "on_wall", len(s.Wall), "added", added)
 	return w.Apply()
+}
+
+// fill joins hidden agent panes onto the wall until it has slots panes,
+// most recently used first. Returns how many were added.
+func (w *Wall) fill(s *State, slots int) int {
+	if len(s.Wall) >= slots {
+		return 0
+	}
+	all, err := w.T.ListPanes("")
+	if err != nil {
+		return 0
+	}
+	session := strings.SplitN(w.Target, ":", 2)[0]
+	var hidden []tmux.PaneInfo
+	for _, p := range all {
+		if p.Session == session && p.Agent != "" && !p.Dead && strings.HasPrefix(p.Window, "ag-") {
+			hidden = append(hidden, p)
+		}
+	}
+	sort.SliceStable(hidden, func(i, j int) bool { return hidden[i].Used > hidden[j].Used })
+	added := 0
+	for _, p := range hidden {
+		if len(s.Wall) >= slots {
+			break
+		}
+		target := s.Ov
+		if len(s.Wall) > 0 {
+			target = s.Wall[len(s.Wall)-1].ID
+		}
+		if _, err := w.T.Run("join-pane", "-d", "-s", p.ID, "-t", target); err != nil {
+			continue
+		}
+		w.T.SetPaneOption(p.ID, "@role", "wall")
+		s.Wall = append(s.Wall, p)
+		added++
+	}
+	return added
 }
 
 // ToggleSup hides or shows the supervisor pane.

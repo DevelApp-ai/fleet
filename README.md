@@ -26,9 +26,10 @@ Session switchers make moving between agents faster, but you still do all the su
 - **Spawn** agents from tool profiles into a dedicated tmux server (`tmux -L fleet`), one hidden window per agent.
 - **Status** for every agent (working, waiting, error, stuck, idle), read from the bottom of each pane with per-tool regex patterns. Polled every second.
 - **Overview TUI**: coloured tiles sorted by attention (waiting agents first, longest wait first), arrow keys, mouse click, `Tab` through waiting agents.
-- **Live wall**: real, interactive tmux panes for the agents you are working with. Layouts 1, 2, 4, 6, 9 and main+stack. The least recently used pane goes back to its hidden window when the wall is full. Processes never restart.
-- **Supervisor**: an agent (Copilot CLI by default) in the left pane with eleven `fleet_*` MCP tools from `fleet mcp`.
-- **CLI** for scripting: `spawn`, `ls`, `send`, `peek`, `close`, `profiles`, `wall`.
+- **Live wall**: real, interactive tmux panes for the agents you are working with. Layouts 1, 2, 4, 6, 9 and main+stack, as caps rather than fixed shapes: the grid is sized to the window so panes stay readable, and the pane that needs attention gets the big slot. When the wall is full, the pane you were last in is replaced in place; otherwise an idle pane leaves before a working one, and waiting or failing panes stay. Processes never restart.
+- **Adopt**: `fleet sessions` lists Copilot and Claude sessions started outside fleet, and `fleet adopt` resumes one as an agent.
+- **Supervisor**: an agent (Copilot CLI by default) in the left pane with thirteen `fleet_*` MCP tools from `fleet mcp`.
+- **CLI** for scripting: `spawn`, `adopt`, `sessions`, `ls`, `send`, `peek`, `close`, `profiles`, `supervisor`, `note`, `keys`, `wall`.
 - **Fake agents** that cycle through states, so you can try everything without spending tokens.
 
 Planned, not built yet: park/wake to save RAM, cheap-model summaries for `peek`, tool hooks instead of screen scraping, a spawn wizard and approve/reject keys in the TUI, notifications, worktree per agent. See [Roadmap](#roadmap).
@@ -170,6 +171,8 @@ Agents start through `bash -lc`, so shell aliases don't apply; make a profile in
 | `fleet_profiles` | List profiles |
 | `fleet_close` | Stop an agent. Needs `confirmed=true` |
 | `fleet_wall` | Show/hide an agent on the wall, or set the layout |
+| `fleet_sessions` | List Copilot/Claude sessions started outside fleet |
+| `fleet_adopt` | Resume one of those sessions as an agent |
 | `fleet_note` | Save a note to `~/.fleet/decisions.log` |
 | `fleet_brief` | Handoff + recent notes + status, for a fresh supervisor |
 | `fleet_handoff` | Write a handoff and restart the supervisor fresh |
@@ -185,6 +188,7 @@ The supervisor must ask you before it answers a prompt or closes an agent. See [
 | `~/.fleet/events.jsonl` | Status transitions |
 | `~/.fleet/tools.toml` | Your profiles |
 | `~/.fleet/patterns.toml` | Your status patterns |
+| `~/.config/fleet/config.toml` | Local preferences, never committed: starting mode (e.g. Copilot autopilot), extra tool args, prompt auto-submit. `$FLEET_CONFIG` overrides the path; see [`examples/config.toml.example`](examples/config.toml.example). |
 | `~/.fleet/logs/fleet.log` | Everything fleet does, one `component=` per line |
 
 See [docs/troubleshooting.md](docs/troubleshooting.md).
@@ -201,13 +205,14 @@ Tests that need tmux use throwaway `fleet-test-*` servers. Architecture: [docs/a
 
 ## Roadmap
 
-Built: slices 0–3 of [DESIGN.md §9](DESIGN.md#9-how-ill-build-and-iterate-quickly) (fake agents, status, overview, live wall), the supervisor's MCP server and supervisor handoff (context meter, notes, `Alt-R` reset). Planned:
+Built: slices 0–3 of [DESIGN.md §9](DESIGN.md#9-how-ill-build-and-iterate-quickly) (fake agents, status, overview, live wall), the supervisor's MCP server, supervisor handoff (context meter, notes, `Alt-R` reset), `fleet adopt`/`fleet sessions`, and a wall that sizes itself to the window. Planned:
 
 - Peek overlay, send, approve/reject and spawn wizard in the TUI
 - Real-tool status patterns from captured screens; hooks for Claude Code and Copilot
 - Park/wake with resume by session ID, a live-process cap and a RAM guard
 - Cheap-model summaries for `peek`
-- tmux control-mode events instead of polling; desktop notifications; worktree per agent; `fleet adopt`; `fleet doctor`
+- Pinned wall panes, auto-slotting waiting agents, saved walls
+- tmux control-mode events instead of polling; desktop notifications; worktree per agent; `fleet doctor`
 
 ## License
 

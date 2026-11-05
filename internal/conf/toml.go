@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Value is a string, []string or map[string]string.
@@ -160,3 +161,33 @@ func List(m map[string]Value, k string) []string { l, _ := m[k].([]string); retu
 
 // Map returns an inline-table field or nil.
 func Map(m map[string]Value, k string) map[string]string { t, _ := m[k].(map[string]string); return t }
+
+// Bool returns a bool field. ok is false when the key is absent or not a bool
+// ("true"/"false", any case).
+func Bool(m map[string]Value, k string) (val, ok bool) {
+	s, isStr := m[k].(string)
+	if !isStr {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
+// Dur returns a duration field parsed with time.ParseDuration. ok is false
+// when the key is absent or unparseable.
+func Dur(m map[string]Value, k string) (d time.Duration, ok bool) {
+	s, isStr := m[k].(string)
+	if !isStr || strings.TrimSpace(s) == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return d, true
+}

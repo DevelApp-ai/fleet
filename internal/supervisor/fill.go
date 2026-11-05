@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/sturlabragason/fleet/internal/theme"
 )
 
 // SessionIDFromCommand finds `--session-id <id>` in a start command (fallback
@@ -132,16 +134,9 @@ func Threshold() int {
 func Band(pct int) string {
 	switch {
 	case pct >= Threshold():
-		return ColorRed
+		return theme.Red
 	case pct >= 40:
-		return ColorYellow
+		return theme.Yellow
 	}
-	return ColorGreen
+	return theme.Green
 }
-
-// Band colours (GitHub dark palette, same as the tile states).
-const (
-	ColorGreen  = "#3fb950"
-	ColorYellow = "#d29922"
-	ColorRed    = "#f85149"
-)

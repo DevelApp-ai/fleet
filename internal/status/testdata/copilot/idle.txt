@@ -1,0 +1,20 @@
+  Current   Sessions   Issues   Pull requests   Gists
+
+                                                                        ┃
+   Your parser change is merged into the branch and green. To cover     ┃
+   the new footer, the simplest route is to capture a pane with         ┃
+   tmux capture-pane -p and drop it into testdata/copilot.              ┃
+   Say the word and I'll prepare that — the table test picks up         ┃
+   any new file automatically, so there is no wiring to do beyond       ┃
+   the filename.                                                        ┃
+                                                                        ┃
+   Going forward I will add a capture whenever a tool changes its       ┃
+   footer; that is the only thing that keeps the status regexes         ┃
+   honest.                                                              ┃
+                                                                        ┃
+ ~/git/fleet         [⎇ main]                  Session: 100.00 AIC used 
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ Interactive · Allow All · / comman · space hold to record Claude Opus 5
+ctx █████░░░ 57% (114k/200k)  pool ████░░░░ 54% (6.6/12G)

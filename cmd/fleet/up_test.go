@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/keys"
+	"github.com/sturlabragason/fleet/internal/tmux"
 	"github.com/sturlabragason/fleet/internal/tools"
 )
 
@@ -35,10 +38,55 @@ func TestDisableUserMCPArgs(t *testing.T) {
 	}
 }
 
+// Finding 1: focusing a wall pane is what makes emphasis move to it, so the
+// hooks must include pane-focus-in next to client-resized/client-attached.
+func TestConfigureSetsPaneFocusHook(t *testing.T) {
+	c := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
+	t.Cleanup(func() { c.KillServer() })
+	if _, err := c.Run("new-session", "-d", "-s", "f", "-n", "main", "cat"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	configure(&fleet.Fleet{T: c, Exe: "/usr/bin/fleet"})
+	// pane-focus-in is a window-scoped hook, so it only shows with -gw.
+	// client-resized/client-attached force a real apply; pane-focus-in fires on
+	// every pane switch, so it takes the cached path instead.
+	for _, h := range []struct{ scope, name, want string }{
+		{"-g", "client-resized", "wall apply"},
+		{"-g", "client-attached", "wall apply"},
+		{"-gw", "pane-focus-in", "wall refresh"},
+	} {
+		hooks, err := c.Run("show-hooks", h.scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, line := range strings.Split(hooks, "\n") {
+			if strings.HasPrefix(line, h.name+"[") {
+				found = true
+				if !strings.Contains(line, h.want) {
+					t.Errorf("%s must run `%s`, got %q", h.name, h.want, line)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("hook %s is not set", h.name)
+		}
+	}
+}
+
+// Outside the fleet server there is no wall, so the refresh-driven apply must
+// be a silent no-op rather than an error (and a log line) every second.
+func TestApplyWallDisabledIsANoop(t *testing.T) {
+	b := &backend{enabled: false} // no wall client at all: must not be touched
+	if err := b.ApplyWall(); err != nil {
+		t.Errorf("disabled wall returned %v", err)
+	}
+}
+
 // TestTmuxBindingsMatchRegistry: every root-table Alt key and every wall
 // chord key fleet up binds is in the keys registry, and vice versa.
 func TestTmuxBindingsMatchRegistry(t *testing.T) {
-	bound := map[string]bool{}
+	bound, chord := map[string]bool{}, map[string]bool{}
 	var statusRight, popup []string
 	for _, c := range tmuxCommands(&fleet.Fleet{Exe: "/opt/my fleet/fleet"}) {
 		if len(c) > 3 && c[0] == "bind-key" && c[1] == "-n" && strings.HasPrefix(c[2], "M-") {
@@ -46,6 +94,9 @@ func TestTmuxBindingsMatchRegistry(t *testing.T) {
 			if c[2] == keys.HelpTmuxKey {
 				popup = c
 			}
+		}
+		if len(c) > 4 && c[0] == "bind-key" && c[1] == "-T" && c[2] == keys.ChordTable {
+			chord[c[3]] = true
 		}
 		if len(c) == 4 && c[0] == "set-option" && c[2] == "status-right" {
 			statusRight = c
@@ -61,6 +112,10 @@ func TestTmuxBindingsMatchRegistry(t *testing.T) {
 		if !bound[k] {
 			t.Errorf("keys registry lists %s but fleet up doesn't bind it", k)
 		}
+	}
+	regChord := keys.ChordKeys()
+	if !reflect.DeepEqual(chord, regChord) {
+		t.Errorf("-T %s binds %v, keys registry claims %v", keys.ChordTable, chord, regChord)
 	}
 	if statusRight == nil || popup == nil {
 		t.Fatal("tmuxCommands must set status-right and bind the help popup")

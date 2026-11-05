@@ -25,17 +25,29 @@ type backend struct {
 }
 
 func (b *backend) Refresh() ([]*board.Agent, error) { return b.f.Refresh() }
-func (b *backend) WallEnabled() bool                { return b.enabled }
+
+// ApplyWall re-tiles after every refresh, so emphasis follows status changes
+// and the dwell/hold clock actually ticks. It is the cached apply: an
+// unchanged layout costs a handful of read-only tmux calls and never touches
+// a pane. It is a no-op (and never logs) when the TUI is not running inside
+// the fleet server.
+func (b *backend) ApplyWall() error {
+	if !b.enabled {
+		return nil
+	}
+	return b.w.ApplyCached()
+}
+func (b *backend) WallEnabled() bool { return b.enabled }
 func (b *backend) OnWall() map[string]bool {
 	if !b.enabled {
 		return map[string]bool{}
 	}
 	return b.w.OnWall()
 }
-func (b *backend) Show(name string) error {
+func (b *backend) Show(name string) (bool, error) {
 	p, err := b.f.Pane(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	return b.w.Show(p)
 }

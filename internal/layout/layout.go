@@ -21,6 +21,7 @@ type Input struct {
 	Ov     string   // overview pane id
 	Wall   []string // wall pane ids in slot order
 	Preset string
+	Focus  string // emphasis pane id (must be on the wall), "" for an even grid
 }
 
 // Build returns the full layout tree.
@@ -47,7 +48,7 @@ func (c Config) Build(in Input) *Node {
 		*right = Node{W: right.W, H: right.H, X: right.X, Y: right.Y, Pane: in.Ov}
 		return root
 	}
-	wall := c.wallTree(in.Wall, in.Preset)
+	wall := &Node{}
 	right.Horiz = false
 	right.Kids = []*Node{ov, wall}
 	oh := c.OvRows()
@@ -55,11 +56,14 @@ func (c Config) Build(in Input) *Node {
 		oh = right.H / 3
 	}
 	sizes(right, []int{oh, right.H - oh - 1}, false)
+	// The wall rectangle is now known, so the grid can be sized against it.
+	tree := c.wallTree(in.Wall, in.Preset, in.Focus, wall.W, wall.H)
+	tree.W, tree.H, tree.X, tree.Y = wall.W, wall.H, wall.X, wall.Y
+	right.Kids[1] = tree
 	return root
 }
 
-func (c Config) wallTree(panes []string, preset string) *Node {
-	leaf := func(p string) *Node { return &Node{Pane: p} }
+func (c Config) wallTree(panes []string, preset, focus string, w, h int) *Node {
 	if len(panes) == 1 {
 		return leaf(panes[0])
 	}
@@ -73,15 +77,68 @@ func (c Config) wallTree(panes []string, preset string) *Node {
 		}
 		return &Node{Horiz: true, Kids: []*Node{leaf(panes[0]), stack}, pct: c.MainPercent}
 	}
-	cols := gridCols(preset)
-	if cols > len(panes) {
-		cols = len(panes)
+	if preset != "1" && focus != "" {
+		if n := c.emphasisTree(panes, focus, w, h); n != nil {
+			return n
+		}
 	}
+	return c.gridTree(panes, w, h)
+}
+
+// emphasisTree gives the focus pane FocusPercent of the wall and grids the
+// rest in the remainder (DESIGN.md §5b.3, ADR-16). It returns nil when the
+// remainder cannot hold the other panes at the minimum pane size, or when the
+// focus pane is not on the wall.
+func (c Config) emphasisTree(panes []string, focus string, w, h int) *Node {
+	var others []string
+	for _, p := range panes {
+		if p != focus {
+			others = append(others, p)
+		}
+	}
+	if len(others) == len(panes) || len(others) == 0 {
+		return nil
+	}
+	// Stacked: focus on top, full width. Side by side: focus on the left.
+	stackedH := h - 1 - part(h, c.FocusPercent)
+	sideW := w - 1 - part(w, c.FocusPercent)
+	_, stacked := gridShape(len(others), w, stackedH, c)
+	_, side := gridShape(len(others), sideW, h, c)
+	horiz := side > stacked // tie goes to stacked: it keeps full code width
+	best, restW, restH := stacked, w, stackedH
+	if horiz {
+		best, restW, restH = side, sideW, h
+	}
+	focusW, focusH := w, part(h, c.FocusPercent)
+	if horiz {
+		focusW, focusH = part(w, c.FocusPercent), h
+	}
+	if best < 1 || score(focusW, focusH, c) < 1 {
+		return nil
+	}
+	return &Node{Horiz: horiz, pct: c.FocusPercent,
+		Kids: []*Node{leaf(focus), c.gridTree(others, restW, restH)}}
+}
+
+// part is the first child's size of a pct split of total (see place).
+func part(total, pct int) int { return (total - 1) * pct / 100 }
+
+// gridTree lays panes out in the auto-grid for a w×h rectangle.
+func (c Config) gridTree(panes []string, w, h int) *Node {
+	if len(panes) == 1 {
+		return leaf(panes[0])
+	}
+	perRow, _ := gridShape(len(panes), w, h, c)
 	var rows []*Node
-	for i := 0; i < len(panes); i += cols {
+	i := 0
+	for _, n := range perRow {
 		row := &Node{Horiz: true}
-		for j := i; j < i+cols && j < len(panes); j++ {
+		for j := i; j < i+n && j < len(panes); j++ {
 			row.Kids = append(row.Kids, leaf(panes[j]))
+		}
+		i += n
+		if len(row.Kids) == 0 {
+			continue
 		}
 		if len(row.Kids) == 1 {
 			row = row.Kids[0]
@@ -93,6 +150,8 @@ func (c Config) wallTree(panes []string, preset string) *Node {
 	}
 	return &Node{Kids: rows}
 }
+
+func leaf(p string) *Node { return &Node{Pane: p} }
 
 // sizes sets the parent's children sizes along its axis; fixed[0] is the first child's size.
 // If fromEnd, the first fixed size applies to the last child instead.

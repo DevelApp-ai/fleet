@@ -17,6 +17,7 @@ Active when the overview pane has focus (click it, or `Alt+arrows`).
 | Left click on a tile or chip | Select it and put it on the wall |
 | `x` | Take the selected agent off the wall |
 | `1` `2` `4` `6` `9` `m` | Wall layout (see below) |
+| `R` | Reset the supervisor (y/n first) |
 | `?` | Show all keys; `q`, `Esc` or `?` closes the list (`q` doesn't quit while it is open) |
 | `q`, `Ctrl+C` | Quit the overview. Run `fleet up` again to restart it. |
 
@@ -34,6 +35,7 @@ Tile order: waiting, error, stuck, working, idle, then the rest; within waiting,
 | `Alt+1` `Alt+2` `Alt+4` `Alt+6` `Alt+9` `Alt+m` | Wall layout |
 | `Alt+s` | Hide or show the supervisor pane |
 | `Alt+Shift+s` | Move the supervisor to the other side |
+| `Alt+Shift+r` | Reset the supervisor: replace it with a fresh session, after a y/n prompt |
 | `Alt+c` | Overview: tiles, or one line of chips |
 | `Alt+o` | Jump to the marked pane (`prefix m` marks one) |
 | `Alt+?` | Popup with every key; any key closes it |
@@ -42,16 +44,20 @@ Mouse is on: click a pane to type in it, drag a border to resize, scroll to read
 
 ## Wall layouts
 
+A layout is a cap on how many panes the wall shows, not a fixed shape. Within that cap the grid is sized to the window: fleet picks the rows and columns that fill the space while keeping every pane at least about 64×17, so five panes become 3+2 rather than a 2×2 with one left over, and a narrow window gets fewer, larger panes.
+
 | Layout | Panes |
 |---|---|
 | `1` | One large pane |
-| `2` | Two side by side |
-| `4` | 2×2 |
-| `6` | 3×2 |
-| `9` | 3×3; only when the window is at least 280 columns wide, otherwise 4 |
+| `2` | Up to two |
+| `4` | Up to four |
+| `6` | Up to six |
+| `9` | Up to nine, as many as fit at a readable size |
 | `m` | Main + stack: one large pane (60% of the wall width) and up to three small ones |
 
-When the wall is full, putting another agent on it sends the least recently used pane back to its hidden window. Choosing a smaller layout does the same for the panes that no longer fit. The agent process keeps running either way.
+One pane gets the large slot: the pane you just focused, or else the one that has been waiting longest. A pane that is only working shrinks. The wall follows your focus on its own; `fleet wall emphasis` turns the large slot off and back on when you want a plain even grid instead.
+
+When the wall is full, putting another agent on it replaces the wall pane you were last in, in the same slot, so nothing else moves. If that pane is pinned or you were not in a wall pane, fleet evicts by status instead: idle panes first, then working ones, least recently used first. Waiting and failing panes are never evicted that way. Choosing a smaller layout sends the panes that no longer fit back to their hidden windows. The agent process keeps running either way.
 
 ## Planned
 
@@ -65,6 +71,5 @@ From [DESIGN.md §5](../DESIGN.md#5-the-tui); not built yet:
 | `n` | Spawn wizard |
 | `z` / `w` | Park / wake |
 | `f` | Focus session on one agent |
-| `R` | Reset the supervisor |
 | `/` | Filter tiles |
 | `P` | Pin a wall pane |

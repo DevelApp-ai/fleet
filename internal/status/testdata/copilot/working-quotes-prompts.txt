@@ -1,0 +1,20 @@
+   cd ~/git/fleet.wt/status-detection && sed -n 185,215p internal/fleet/rea… ┃
+                                                                                              ┃
+ ❯ Thought for 2s                                                                             ┃
+                                                                                              ┃
+ ● The ready test expects any "Do you want to …" prompt to count; my verb list was too        ┃
+   narrow. Restoring the broader pattern (a reply ending in "Do you want to…?" is a question  ┃
+   to the user anyway).                                                                       ┃
+                                                                                              ┃
+ $ Shell Restore pattern and retest 2 lines…                                               5s ┃
+   cd ~/git/fleet.wt/status-detection && sed -i "s/'Do you want to (run|all… ┃
+                                                                                              ┃
+ ● All green. Now classifying fresh read-only captures of every live pane with the new        ┃
+   patterns:                                                                                  ┃
+                                                                                              ┃
+ ~/git/fleet         [⎇ main]                                         Session: 100.00 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ Autopilot · Allow All · ◉ Working · 43.3 KiB esc esc interrupt                Claude Opus 5.5
+ctx ███░░░░░ 42% (84k/200k)  pool █████░░░ 60% (7.3/12G)

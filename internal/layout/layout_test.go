@@ -80,3 +80,35 @@ func TestApplyInTmux(t *testing.T) {
 		}
 	}
 }
+
+// Real tmux must accept the new grid shapes (5 and 7 panes) and emphasis.
+func TestApplyNewShapesInTmux(t *testing.T) {
+	sock := fmt.Sprintf("fleet-test-%d", rand.Int63())
+	tm := func(a ...string) (string, error) {
+		out, err := exec.Command("tmux", append([]string{"-L", sock, "-f", "/dev/null"}, a...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	t.Cleanup(func() { p, _ := tm("display", "-p", "#{socket_path}"); tm("kill-server"); os.Remove(p) })
+	for _, n := range []int{2, 3, 5, 7} {
+		sess := fmt.Sprintf("s%d", n)
+		if _, err := tm("new-session", "-d", "-s", sess, "-x", "300", "-y", "80", "cat"); err != nil {
+			t.Skip("no tmux")
+		}
+		for i := 0; i < n+1; i++ { // sup + overview + n wall panes
+			tm("split-window", "-t", sess, "cat")
+			tm("select-layout", "-t", sess, "even-vertical")
+		}
+		ids, _ := tm("list-panes", "-t", sess, "-F", "#{pane_id}")
+		p := strings.Split(ids, "\n")
+		hs, _ := tm("display", "-p", "-t", sess, "#{window_height}")
+		var h int
+		fmt.Sscan(hs, &h)
+		for _, focus := range []string{"", p[2]} {
+			in := Input{W: 300, H: h, Sup: p[0], Ov: p[1], Wall: p[2:], Preset: "9", Focus: focus}
+			s, _ := Default.Render(in)
+			if out, err := tm("select-layout", "-t", sess, s); err != nil {
+				t.Errorf("n=%d focus=%q: %v %s (%s)", n, focus, err, out, s)
+			}
+		}
+	}
+}

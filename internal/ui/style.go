@@ -1,17 +1,22 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sturlabragason/fleet/internal/theme"
+)
 
 // Colours per status; pulse alternates for waiting tiles.
 var (
-	colWorking = lipgloss.Color("#3fb950")
-	colWaitA   = lipgloss.Color("#d29922")
-	colWaitB   = lipgloss.Color("#ffd75f")
-	colError   = lipgloss.Color("#f85149")
-	colIdle    = lipgloss.Color("#8b949e")
-	colGone    = lipgloss.Color("#484f58")
-	colSelect  = lipgloss.Color("#58a6ff")
-	colText    = lipgloss.Color("#c9d1d9")
+	colWorking = lipgloss.Color(theme.Working)
+	colWaitA   = lipgloss.Color(theme.Waiting)
+	colWaitB   = lipgloss.Color(theme.WaitingAlt)
+	colError   = lipgloss.Color(theme.Error)
+	colStuck   = lipgloss.Color(theme.Stuck)
+	colIdle    = lipgloss.Color(theme.Idle)
+	colGone    = lipgloss.Color(theme.Gone)
+	colSelect  = lipgloss.Color(theme.Select)
+	colText    = lipgloss.Color(theme.Text)
 )
 
 var spinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -25,8 +30,10 @@ func statusColor(st string, frame int) lipgloss.Color {
 			return colWaitA
 		}
 		return colWaitB
-	case "error", "stuck":
+	case "error":
 		return colError
+	case "stuck":
+		return colStuck
 	case "gone":
 		return colGone
 	}

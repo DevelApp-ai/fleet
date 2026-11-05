@@ -8,6 +8,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/sturlabragason/fleet/internal/theme"
 )
 
 // Group is the area a binding belongs to.
@@ -38,6 +40,7 @@ type Binding struct {
 	Group Group
 	Key   string           // display key, e.g. "Alt-s"
 	Tmux  []string         // tmux root-table keys it binds ("M-s"); none for overview-only keys
+	Chord []string         // keys it binds in the ChordTable tmux key table
 	Desc  string           // one-line explanation
 	Hints map[Scope]string // optional short hint item per scope, e.g. "Alt-z zoom"
 }
@@ -52,6 +55,8 @@ var Bindings = []Binding{
 		Desc: "hide this pane (the agent keeps running)", Hints: map[Scope]string{ScopeTmux: "Alt-x hide"}},
 	{Group: Panes, Key: "Alt-o", Tmux: []string{"M-o"},
 		Desc: "jump to the marked pane (right-click → Mark)"},
+	{Group: Wall, Key: "Alt-w 1/2/4/6/9/m", Tmux: []string{"M-w"}, Chord: []string{"1", "2", "4", "6", "9", "m"},
+		Desc: "same as Alt-1…9/m: Alt-w, let go, then the key"},
 	{Group: Wall, Key: "Alt-1/2/4/6/9", Tmux: []string{"M-1", "M-2", "M-4", "M-6", "M-9"},
 		Desc: "wall: show up to N panes"},
 	{Group: Wall, Key: "Alt-m", Tmux: []string{"M-m"},
@@ -61,7 +66,7 @@ var Bindings = []Binding{
 	{Group: Supervisor, Key: "Alt-S", Tmux: []string{"M-S"},
 		Desc: "move the supervisor left/right"},
 	{Group: Supervisor, Key: "Alt-R", Tmux: []string{"M-R"},
-		Desc: "reset the supervisor: fresh session from notes + handoff (asks y/n)"},
+		Desc: "reset the supervisor to a fresh chat (asks y/n)"},
 	{Group: Overview, Key: "Alt-c", Tmux: []string{"M-c"},
 		Desc: "overview: tiles ↔ compact chips"},
 	{Group: Overview, Key: "←↑↓→ / hjkl",
@@ -75,10 +80,13 @@ var Bindings = []Binding{
 	{Group: Overview, Key: "1/2/4/6/9/m",
 		Desc: "same as Alt-1…9 / Alt-m"},
 	{Group: Overview, Key: "R",
-		Desc: "same as Alt-R (reset the supervisor)"},
+		Desc: "same as Alt-R: reset the supervisor (asks y/n)"},
 	{Group: Overview, Key: "q",
 		Desc: "quit the overview"},
 }
+
+// ChordTable is the tmux key table Alt-w switches to for the wall chord.
+const ChordTable = "fleetwall"
 
 // HelpTmuxKey is the tmux key that opens the help popup. It is shown as the
 // footer of the help, not as a row.
@@ -133,6 +141,17 @@ func Hint(scope Scope, width int) string {
 	}
 }
 
+// ChordKeys returns the set of keys the registry claims in ChordTable.
+func ChordKeys() map[string]bool {
+	m := map[string]bool{}
+	for _, b := range Bindings {
+		for _, k := range b.Chord {
+			m[k] = true
+		}
+	}
+	return m
+}
+
 // TmuxKeys returns the set of tmux root-table keys the registry claims.
 func TmuxKeys() map[string]bool {
 	m := map[string]bool{HelpTmuxKey: true}
@@ -154,9 +173,9 @@ func Help(width int) string {
 // HelpStyled is Help with theme colours: bold Mauve group headings, a bold
 // key column and Subtext0 descriptions.
 func HelpStyled(width int) string {
-	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cba6f7"))
-	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4"))
-	desc := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
+	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.Mauve))
+	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.Text))
+	desc := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Subtext0))
 	r := func(st lipgloss.Style) func(string) string { return func(s string) string { return st.Render(s) } }
 	return help(width, r(head), r(key), r(desc))
 }
@@ -165,9 +184,9 @@ func HelpStyled(width int) string {
 // Wall | Supervisor and Overview) with the footer below, for places too short
 // for the single list. width is the total width; each column wraps to half.
 func HelpColumns(width int) string {
-	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cba6f7"))
-	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4"))
-	desc := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
+	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.Mauve))
+	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.Text))
+	desc := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Subtext0))
 	r := func(st lipgloss.Style) func(string) string { return func(s string) string { return st.Render(s) } }
 	const gap = 2
 	cw := max(minCol, (width-gap)/2)

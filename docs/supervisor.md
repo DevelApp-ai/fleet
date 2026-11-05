@@ -26,6 +26,8 @@ If you use a different tool as supervisor, register `fleet mcp` as a stdio MCP s
 | `fleet_profiles` | none | Profiles and their command lines |
 | `fleet_close` | `name`, `confirmed` | Stop the agent and remove it from the board |
 | `fleet_wall` | `action` (`show`/`hide`/`preset`), `name` or `preset` | Change the wall |
+| `fleet_sessions` | `query` (optional), `limit` | Copilot/Claude sessions started outside fleet, newest first |
+| `fleet_adopt` | `session_id` or `query`, plus optional `profile`, `dir`, `name` | Resume one of those sessions as an agent |
 | `fleet_note` | `text`, `agent` (optional) | Append a line to `~/.fleet/decisions.log` |
 | `fleet_brief` | none | Latest handoff, last 30 notes, then the `fleet_status` table. A fresh supervisor calls this first. |
 | `fleet_handoff` | `summary` | Write `~/.fleet/supervisor/handoff.md` and replace the supervisor with a fresh session |

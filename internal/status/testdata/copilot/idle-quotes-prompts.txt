@@ -1,0 +1,24 @@
+  Current   Sessions   Issues   Pull requests   Gists
+ ● Fixed. The classifier now treats these as waiting:              ┃
+   - "Do you want to run this command?"                            ┃
+   - "↑/↓ to navigate · enter to select · esc to cancel"           ┃
+   - "Copilot needs information."                                  ┃
+   Line 1 of the summary with nothing special in it.             ┃
+   Line 2 of the summary with nothing special in it.             ┃
+   Line 3 of the summary with nothing special in it.             ┃
+   Line 4 of the summary with nothing special in it.             ┃
+   Line 5 of the summary with nothing special in it.             ┃
+   Line 6 of the summary with nothing special in it.             ┃
+   Line 7 of the summary with nothing special in it.             ┃
+   Line 8 of the summary with nothing special in it.             ┃
+   Line 9 of the summary with nothing special in it.             ┃
+   Line 10 of the summary with nothing special in it.             ┃
+   Line 11 of the summary with nothing special in it.             ┃
+   Line 12 of the summary with nothing special in it.             ┃
+                                                                        ┃
+ ~/git/fleet         [⎇ main]                  Session: 100.00 AIC used 
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ Interactive · Allow All · / comman · space hold to record Claude Opus 5
+ctx █████░░░ 57% (114k/200k)  pool ████░░░░ 54% (6.6/12G)

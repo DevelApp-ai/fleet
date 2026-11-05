@@ -12,10 +12,13 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/sturlabragason/fleet/internal/board"
+	"github.com/sturlabragason/fleet/internal/wall"
 )
 
 type fakeBE struct {
 	shown, hidden []string
+	applied       int
+	refuse        bool
 	noWall        bool
 	ctx           [2]string
 	ctxSets       [][2]string
@@ -32,11 +35,15 @@ func (f *fakeBE) Refresh() ([]*board.Agent, error) {
 		{Name: "echo", Profile: "fake", Status: "idle", StatusSince: t0},
 	}, nil
 }
-func (f *fakeBE) OnWall() map[string]bool  { return map[string]bool{"alpha": true} }
-func (f *fakeBE) Show(n string) error      { f.shown = append(f.shown, n); return nil }
+func (f *fakeBE) OnWall() map[string]bool { return map[string]bool{"alpha": true} }
+func (f *fakeBE) Show(n string) (bool, error) {
+	f.shown = append(f.shown, n)
+	return !f.refuse, nil
+}
 func (f *fakeBE) Hide(n string) error      { f.hidden = append(f.hidden, n); return nil }
 func (f *fakeBE) Preset(string) error      { return nil }
 func (f *fakeBE) WallEnabled() bool        { return !f.noWall }
+func (f *fakeBE) ApplyWall() error         { f.applied++; return nil }
 func (f *fakeBE) SupCtx() (string, string) { return f.ctx[0], f.ctx[1] }
 func (f *fakeBE) SetSupCtx(l, c string) error {
 	f.ctxSets = append(f.ctxSets, [2]string{l, c})
@@ -122,6 +129,36 @@ func TestXHidesOnlyWallTiles(t *testing.T) {
 	m.key("x")()
 	if len(be.hidden) != 1 || be.hidden[0] != "alpha" {
 		t.Errorf("hidden %v", be.hidden)
+	}
+}
+
+// Finding 1: nothing re-tiles the wall when a pane's status flips, so the
+// refresh loop must apply the layout after every poll (cheap: cached).
+func TestPollAppliesTheWall(t *testing.T) {
+	be := &fakeBE{}
+	m := New(be, "")
+	msg := m.poll()()
+	if _, ok := msg.(agentsMsg); !ok {
+		t.Fatalf("poll returned %T", msg)
+	}
+	if be.applied != 1 {
+		t.Errorf("wall applied %d times per poll, want 1", be.applied)
+	}
+}
+
+// Finding 4: a refused Show (wall full, nothing evictable) must not be
+// reported to the user as "on wall".
+func TestShowRefusalIsReported(t *testing.T) {
+	be := &fakeBE{refuse: true}
+	m := New(be, "")
+	m.sel = "alpha"
+	got, ok := m.show()().(infoMsg)
+	if !ok || string(got) != wall.FullMsg {
+		t.Errorf("got %q, want %q", got, wall.FullMsg)
+	}
+	be.refuse = false
+	if got := m.show()().(infoMsg); string(got) != "alpha on wall" {
+		t.Errorf("got %q, want the success message", got)
 	}
 }
 

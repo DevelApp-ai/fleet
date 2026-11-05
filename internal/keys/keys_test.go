@@ -85,7 +85,7 @@ func TestHelpGroupsAndRows(t *testing.T) {
 
 func TestTmuxKeys(t *testing.T) {
 	k := TmuxKeys()
-	for _, want := range []string{"M-?", "M-Left", "M-z", "M-x", "M-o", "M-1", "M-9", "M-m", "M-s", "M-S", "M-c"} {
+	for _, want := range []string{"M-?", "M-Left", "M-z", "M-x", "M-o", "M-1", "M-9", "M-m", "M-s", "M-S", "M-c", "M-w"} {
 		if !k[want] {
 			t.Errorf("missing %s", want)
 		}
@@ -107,6 +107,27 @@ func TestPopupFitsHelp(t *testing.T) {
 	}
 	if PopupHeight() != len(strings.Split(Help(inner), "\n"))+2 {
 		t.Error("popup height must be the help lines plus the border")
+	}
+}
+
+func TestChordRowFirstInWall(t *testing.T) {
+	for _, b := range Bindings {
+		if b.Group == Wall {
+			if b.Key != "Alt-w 1/2/4/6/9/m" || len(b.Tmux) != 1 || b.Tmux[0] != "M-w" {
+				t.Errorf("first Wall row %+v", b)
+			}
+			break
+		}
+	}
+	c := ChordKeys()
+	for _, k := range []string{"1", "2", "4", "6", "9", "m"} {
+		if !c[k] {
+			t.Errorf("chord key %s missing", k)
+		}
+	}
+	h := Help(0)
+	if !strings.Contains(h, "\n  Alt-w 1/2/4/6/9/m\n                same as Alt-1") {
+		t.Errorf("long key should sit on its own line above its description:\n%s", h)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/layout"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/wall"
 )
 
 // Model is the overview state.
@@ -69,6 +70,9 @@ func (m *Model) poll() tea.Cmd {
 	be := m.be
 	return func() tea.Msg {
 		as, err := be.Refresh()
+		// Re-tile on every poll: nothing else notices a status flip, so this
+		// is what makes emphasis move when a pane starts waiting (§5b.3).
+		_ = be.ApplyWall()
 		l, c := be.SupCtx()
 		return agentsMsg{agents: as, onWall: be.OnWall(), supCtx: [2]string{l, c}, err: err}
 	}
@@ -266,9 +270,13 @@ func (m *Model) show() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		if err := be.Show(name); err != nil {
+		ok, err := be.Show(name)
+		if err != nil {
 			logx.For("ui").Error("show failed", "agent", name, "err", err)
 			return infoMsg("show " + name + ": " + err.Error())
+		}
+		if !ok {
+			return infoMsg(wall.FullMsg)
 		}
 		return infoMsg(name + " on wall")
 	}

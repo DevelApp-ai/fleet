@@ -1,0 +1,30 @@
+   be covered by the existing table test.                                                                                                                                                                          ┃
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ ┃
+  ❯ do the parser changes need new fixtures?                                                                                                                                                                       ┃
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ┃
+ ❯ Thought for 1s                                                                                                                                                                                                  ┃
+                                                                                                                                                                                                                   ┃
+ ● Probably, yes: the new footer shape is not covered yet. I will check what the table test already exercises.                                                                                                     ┃
+                                                                                                                                                                                                                   ┃
+ $ Shell Check fixture coverage 21 lines…                                                                                                                                                                          ┃
+   cd ~/git/fleet && grep -rl "ctx " internal/status/testdata | sort; go test ./internal/status/ -run TestCaptures -v 2>&1 | tail -20                                                             ┃
+                                                                                                                                                                                                                   ┃
+ ❯ Thought for 2s                                                                                                                                                                                                  ┃
+ ● Task complete                                                                                                                                                                                                   ┃
+ ● Task complete                                                                                                                                                                                                   ┃
+   └ The table test covers every capture, but two shapes are missing.                                                                                                                                              ┃
+                                                                                                                                                                                                                   ┃
+      - The narrow variant is covered. The wide one is not: no capture has the footer and the context meter on the same row.                                                                                       ┃
+     A capture of that shape would pin the regex that reads the meter.                                                                                                                                             ┃
+      - Nothing is broken. The existing patterns classify all thirteen captures correctly.                                                                                                                         ┃
+      - The risk is drift. Each new footer layout needs a capture, or the parser silently loses a state.                                                                                                           ┃
+                                                                                                                                                                                                                   ┃
+     Suggestion: add one wide capture and one narrow capture per state, and keep them in testdata so the table test picks them up automatically.                                                                   ┃
+     them up along with the rest. Tell me if you'd rather I do it.                                                                                                                                                 ┃
+                                                                                                                                                                                                                   ┃
+ ~/git/fleet         [⎇ main]                                                                                                                                                              Session: 100.00 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ ← open sidebar · Autopilot · Allow All · / commands · tab next tab · space hold to record                                                                                                          Claude Opus 5.5
+ctx ████░░░░ 54% (108k/200k)  pool ████░░░░ 54% (6.6/12G)

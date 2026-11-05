@@ -2,11 +2,13 @@ package fleet
 
 import (
 	"hash/fnv"
+	"strconv"
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/logx"
 	"github.com/sturlabragason/fleet/internal/status"
+	"github.com/sturlabragason/fleet/internal/theme"
 )
 
 // Refresh captures every agent pane, updates statuses on the board, logs
@@ -16,11 +18,13 @@ func (f *Fleet) Refresh() ([]*board.Agent, error) {
 	byAgent := map[string]bool{}
 	dead := map[string]bool{}
 	ids := map[string]string{}
+	tagged := map[string]string{}
 	for _, p := range panes {
 		if p.Agent != "" {
 			byAgent[p.Agent] = true
 			dead[p.Agent] = p.Dead
 			ids[p.Agent] = p.ID
+			tagged[p.Agent] = p.Status
 		}
 	}
 	now := time.Now()
@@ -33,7 +37,11 @@ func (f *Fleet) Refresh() ([]*board.Agent, error) {
 				a.Status, a.StatusSince = next, now
 				logx.For("status").Info("transition", "agent", a.Name, "from", prev, "to", next, "line", a.LastLine)
 				f.Store.AppendEvent(board.Event{Time: now, Agent: a.Name, From: prev, To: next})
-				f.tagPane(ids[a.Name], next)
+				f.tagPane(ids[a.Name], next, now)
+			} else if id := ids[a.Name]; id != "" && tagged[a.Name] != next {
+				// The pane title lags the board (pane re-created, tag lost, or
+				// set by an older fleet): re-sync without resetting the age.
+				f.tagPane(id, next, a.StatusSince)
 			}
 		}
 		out = b.Sorted()
@@ -65,7 +73,11 @@ func (f *Fleet) classify(a *board.Agent, alive, dead bool, pane string, now time
 	if t := status.Tail(text, 1); len(t) > 0 {
 		a.LastLine = t[0]
 	}
-	st, ok := f.Patterns[a.Patterns].Detect(text)
+	st, line, ok := f.Patterns[a.Patterns].Match(text)
+	if ok && (st == status.Waiting || st == status.Error) && line != "" {
+		// waiting_for: the prompt, not the footer under it.
+		a.LastLine = line
+	}
 	switch {
 	case !ok && changed:
 		st = status.Working
@@ -83,23 +95,22 @@ func (f *Fleet) classify(a *board.Agent, alive, dead bool, pane string, now time
 	return string(st)
 }
 
-var paneColors = map[string]string{"working": "#3fb950", "waiting": "#d29922", "error": "#f85149", "stuck": "#f85149", "idle": "#8b949e"}
 var paneGlyphs = map[string]string{"working": "⠹", "waiting": "●", "error": "✖", "stuck": "⧗", "idle": "○"}
 
-// tagPane stores the status on the pane so tmux border formats can show it.
-func (f *Fleet) tagPane(pane, st string) {
+// tagPane stores the status on the pane so tmux border formats can show it and
+// the wall can evict and emphasise by status. since is the time the agent
+// entered this status (now on a transition, the board's StatusSince on a re-sync).
+func (f *Fleet) tagPane(pane, st string, since time.Time) {
 	if pane == "" {
 		return
 	}
-	c, ok := paneColors[st]
-	if !ok {
-		c = "#8b949e"
-	}
+	c := theme.Status(st)
 	g, ok := paneGlyphs[st]
 	if !ok {
 		g = "?"
 	}
 	f.T.SetPaneOption(pane, "@fleet_status", st)
+	f.T.SetPaneOption(pane, "@fleet_status_since", strconv.FormatInt(since.UnixNano(), 10))
 	f.T.SetPaneOption(pane, "@fleet_color", c)
 	f.T.SetPaneOption(pane, "@fleet_glyph", g)
 }

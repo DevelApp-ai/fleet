@@ -6,8 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sturlabragason/fleet/internal/fleet"
+	"github.com/sturlabragason/fleet/internal/sessions"
 	"github.com/sturlabragason/fleet/internal/supervisor"
 	"github.com/sturlabragason/fleet/internal/tools"
+	"github.com/sturlabragason/fleet/internal/wall"
 )
 
 type tool struct {
@@ -38,6 +41,11 @@ var toolDefs = []tool{
 		"name": str("agent name"), "answer": map[string]any{"type": "string", "enum": []string{"y", "n"}}, "confirmed": confirmedProp})},
 	{"fleet_spawn", "Start a new agent with a tool profile in a directory, optionally with a first prompt.", obj([]string{"name", "profile", "dir"}, map[string]any{
 		"name": str("short unique agent name"), "profile": str("tool profile, see fleet_profiles"), "dir": str("working directory (absolute)"), "prompt": str("optional first prompt")})},
+	{"fleet_sessions", "Find copilot/claude sessions the user started outside fleet, newest first: id | age | profile | dir | title | flags. Use before fleet_adopt.", obj(nil, map[string]any{
+		"query": str("optional words; every word must appear in title, dir, branch or id"), "limit": map[string]any{"type": "integer", "description": "max sessions (default 15)"}})},
+	{"fleet_adopt", "Resume an existing session the user started outside fleet as a fleet agent. Pass session_id (full id or unique 8+ char prefix) or query (words that match exactly one session), not both. Refuses if the session is missing or still open elsewhere.", obj(nil, map[string]any{
+		"session_id": str("session id from fleet_sessions"), "query": str("words matching exactly one session"), "profile": str("optional tool profile; default the suggested one"),
+		"dir": str("optional working directory (absolute); default from the session"), "name": str("optional agent name; default base name of dir")})},
 	{"fleet_profiles", "List tool profiles that fleet_spawn accepts.", obj(nil, map[string]any{})},
 	{"fleet_close", "Stop an agent and remove it from the board. Ask the user first; set confirmed=true only after an explicit yes.", obj([]string{"name", "confirmed"}, map[string]any{
 		"name": str("agent name"), "confirmed": confirmedProp})},
@@ -51,9 +59,10 @@ var toolDefs = []tool{
 }
 
 type args struct {
-	Name, Text, Answer, Profile, Dir, Prompt, Action, Preset, Agent, Summary string
-	Lines                                                                    int
-	Confirmed                                                                bool
+	Name, Text, Answer, Profile, Dir, Prompt, Action, Preset, Agent, Summary, Query string
+	SessionID                                                                       string `json:"session_id"`
+	Lines, Limit                                                                    int
+	Confirmed                                                                       bool
 }
 
 func (s *Server) call(name string, raw json.RawMessage) (string, error) {
@@ -119,11 +128,45 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 			return "", err
 		}
 		return fmt.Sprintf("spawned %s (%s) in %s", ag.Name, ag.Profile, ag.Dir), nil
+	case "fleet_sessions":
+		return s.sessions(a.Query, a.Limit)
+	case "fleet_adopt":
+		o := fleet.AdoptOpts{Profile: a.Profile, Dir: a.Dir, Name: a.Name}
+		id, q := strings.TrimSpace(a.SessionID), strings.TrimSpace(a.Query)
+		var res sessions.Session
+		switch {
+		case (id == "") == (q == ""):
+			return "", fmt.Errorf("pass exactly one of session_id or query")
+		case q != "":
+			r, err := s.F.ResolveWords(a.Profile, strings.Fields(q))
+			if err != nil {
+				return "", err
+			}
+			res = r
+		default:
+			r, ok, err := s.F.ResolveID(a.Profile, id)
+			if err != nil {
+				return "", err
+			}
+			if !ok && a.Profile == "" {
+				return "", fmt.Errorf("no session %s; try fleet_sessions", id)
+			}
+			res = r
+			if !ok { // not in the store: Adopt reports it
+				res = sessions.Session{ID: id, Profile: a.Profile}
+			}
+		}
+		ag, err := s.F.AdoptResolved(o, res)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("adopted %s (%s) session %s in %s", ag.Name, ag.Profile, ag.SessionID, ag.Dir), nil
 	case "fleet_profiles":
 		var b strings.Builder
 		for _, n := range tools.Names(s.F.Profiles) {
 			p := s.F.Profiles[n]
-			fmt.Fprintf(&b, "%s: %s\n", n, strings.Join(p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>"}, false), " "))
+			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>"}, tools.Launch{})
+			fmt.Fprintf(&b, "%s: %s\n", n, strings.Join(argv, " "))
 		}
 		return b.String(), nil
 	case "fleet_close":
@@ -144,7 +187,11 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 				return "", err
 			}
 			if a.Action == "show" {
-				return a.Name + " on wall", s.W.Show(p)
+				ok, err := s.W.Show(p)
+				if err != nil || !ok {
+					return wall.FullMsg, err
+				}
+				return a.Name + " on wall", nil
 			}
 			return a.Name + " off wall", s.W.Hide(p)
 		}
@@ -195,6 +242,33 @@ func (s *Server) status() (string, error) {
 			w = "yes"
 		}
 		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s\n", a.Name, a.Profile, a.Status, w, time.Since(a.StatusSince).Round(time.Second), wf)
+	}
+	return b.String(), nil
+}
+
+// sessions lists sessions to adopt, one line each.
+func (s *Server) sessions(query string, limit int) (string, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+	ss, err := s.F.Sessions(sessions.Opts{Words: strings.Fields(query), Limit: limit})
+	if err != nil {
+		return "", err
+	}
+	if len(ss) == 0 {
+		return "no sessions match", nil
+	}
+	var b strings.Builder
+	b.WriteString("id | age | profile | dir | title | flags\n")
+	for _, x := range ss {
+		var flags []string
+		if x.InUse {
+			flags = append(flags, "in use")
+		}
+		if x.OnBoard {
+			flags = append(flags, "on board")
+		}
+		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s\n", x.ID, sessions.Age(time.Since(x.Updated)), x.Profile, x.Dir, sessions.OneLine(x.Title, 80), strings.Join(flags, ", "))
 	}
 	return b.String(), nil
 }
