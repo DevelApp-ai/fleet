@@ -13,8 +13,10 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/sturlabragason/fleet/internal/board"
+	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/layout"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/team"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
@@ -22,7 +24,9 @@ import (
 type Model struct {
 	be       Backend
 	agents   []*board.Agent // attention-sorted
+	queuePos map[string]int // queued agent -> 1-based start position
 	onWall   map[string]bool
+	teams    map[string]team.Info
 	sel      string
 	w, h     int
 	frame    int
@@ -32,13 +36,14 @@ type Model struct {
 	stateDir string
 	cfg      layout.Config
 	now      func() time.Time
-	supCtx   [2]string // last label/colour set on the supervisor border
+	supCtx   [2]string // last label/colour set on the admiral border
 	ctxSet   bool
 }
 
 type agentsMsg struct {
 	agents []*board.Agent
 	onWall map[string]bool
+	teams  map[string]team.Info
 	supCtx [2]string
 	err    error
 }
@@ -74,7 +79,7 @@ func (m *Model) poll() tea.Cmd {
 		// is what makes emphasis move when a pane starts waiting (§5b.3).
 		_ = be.ApplyWall()
 		l, c := be.SupCtx()
-		return agentsMsg{agents: as, onWall: be.OnWall(), supCtx: [2]string{l, c}, err: err}
+		return agentsMsg{agents: as, onWall: be.OnWall(), teams: be.Teams(), supCtx: [2]string{l, c}, err: err}
 	}
 }
 
@@ -107,6 +112,7 @@ func (m *Model) Update(msg tea.Msg) (_ tea.Model, cmd tea.Cmd) {
 		}
 		m.setAgents(msg.agents)
 		m.onWall = msg.onWall
+		m.teams = msg.teams
 		return m, tea.Batch(pollLater(), m.syncSupCtx(msg.supCtx))
 	case pollMsg:
 		return m, m.poll()
@@ -143,6 +149,10 @@ func (m *Model) setAgents(as []*board.Agent) {
 		return as[i].Name < as[j].Name
 	})
 	m.agents = as
+	m.queuePos = map[string]int{}
+	for i, a := range fleet.QueueOrder(as) {
+		m.queuePos[a.Name] = i + 1
+	}
 	if m.index() < 0 && len(as) > 0 {
 		m.sel = as[0].Name
 	}
@@ -158,11 +168,7 @@ func (m *Model) index() int {
 }
 
 func (m *Model) cols() int {
-	c := m.w / m.cfg.TileW
-	if c < 1 {
-		c = 1
-	}
-	return c
+	return m.grid().Cols
 }
 
 func (m *Model) key(k string) tea.Cmd {
@@ -235,6 +241,32 @@ func (m *Model) key(k string) tea.Cmd {
 			}
 			return nil
 		}
+	case "P":
+		if !m.be.WallEnabled() {
+			m.msg = "P needs fleet up"
+			return nil
+		}
+		be := m.be
+		return func() tea.Msg {
+			if err := be.PickProfile(); err != nil {
+				logx.For("ui").Error("profile picker", "err", err)
+				return infoMsg("profile: " + err.Error())
+			}
+			return nil
+		}
+	case "g":
+		if !m.be.WallEnabled() {
+			m.msg = "g needs fleet up"
+			return nil
+		}
+		be := m.be
+		return func() tea.Msg {
+			if err := be.Changes(); err != nil {
+				logx.For("ui").Error("changes popup", "err", err)
+				return infoMsg("changes: " + err.Error())
+			}
+			return nil
+		}
 	case "x":
 		name, be := m.sel, m.be
 		if name == "" || !m.onWall[name] {
@@ -282,7 +314,7 @@ func (m *Model) show() tea.Cmd {
 	}
 }
 
-// syncSupCtx updates the supervisor border meter only when it changed.
+// syncSupCtx updates the admiral border meter only when it changed.
 func (m *Model) syncSupCtx(v [2]string) tea.Cmd {
 	if m.ctxSet && v == m.supCtx {
 		return nil
@@ -291,7 +323,7 @@ func (m *Model) syncSupCtx(v [2]string) tea.Cmd {
 	be := m.be
 	return func() tea.Msg {
 		if err := be.SetSupCtx(v[0], v[1]); err != nil {
-			logx.For("ui").Warn("set supervisor ctx", "err", err)
+			logx.For("ui").Warn("set admiral ctx", "err", err)
 		}
 		return nil
 	}

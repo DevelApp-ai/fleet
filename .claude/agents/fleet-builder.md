@@ -13,6 +13,6 @@ How to work:
 - Update the `fleet` usage text if you add or change a command. If you add an MCP tool, add it to `internal/mcp` and describe it in `internal/mcp/instructions.md`.
 - Run the done-check from the brief until it exits 0. If the same failure happens twice, stop and report the root cause instead of grinding.
 
-Never: touch the tmux server `fleet` (the user's live fleet) or the default tmux server; spawn real claude/copilot/agy/vibe processes; pkill/killall; push; commit (the orchestrator commits after review).
+Never: touch the tmux server `fleet` (the user's live fleet) or the default tmux server; spawn real claude/copilot/agy/vibe processes; pkill/killall; push; commit (the api-service commits after review).
 
 Report back (short): files changed, what the user can now do, done-check output tail, anything left undone or any decision you made that the brief didn't cover.

@@ -34,8 +34,10 @@ func statusColor(st string, frame int) lipgloss.Color {
 		return colError
 	case "stuck":
 		return colStuck
-	case "gone":
+	case "gone", "queued":
 		return colGone
+	case "starting":
+		return colWorking
 	}
 	return colIdle
 }
@@ -54,8 +56,25 @@ func glyph(st string, frame int) string {
 		return "○"
 	case "gone":
 		return "·"
+	case "queued":
+		return "‖"
+	case "starting":
+		return "▸"
 	}
 	return "?"
+}
+
+// reportStyle is the glyph and colour of a report state on a tile.
+func reportStyle(state string) (string, lipgloss.Color) {
+	switch state {
+	case "done":
+		return "✓", colWorking
+	case "blocked":
+		return "✗", colError
+	case "question":
+		return "?", colWaitA
+	}
+	return "…", colIdle
 }
 
 // attention rank: lower sorts first.
@@ -67,12 +86,14 @@ func rank(st string) int {
 		return 1
 	case "stuck":
 		return 2
-	case "working":
+	case "working", "starting":
 		return 3
 	case "idle":
 		return 4
 	case "unknown":
 		return 5
+	case "queued":
+		return 7
 	}
 	return 6
 }

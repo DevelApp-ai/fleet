@@ -111,3 +111,12 @@ func (f *Fleet) autostart(io paneIO, sleep func(time.Duration), pane string, p t
 		}
 	}
 }
+
+// PastePrompt waits up to timeout for pane to accept input, then pastes
+// prompt and presses Enter. Used for the admiral's boot prompt when its
+// profile has no prompt_args (DESIGN §6.10).
+func (f *Fleet) PastePrompt(pane string, p tools.Profile, prompt string, timeout time.Duration) {
+	pr := prefs.Neutral()
+	pr.ReadyTimeout = timeout
+	f.autostart(f.T, time.Sleep, pane, p, pr, prompt, false)
+}

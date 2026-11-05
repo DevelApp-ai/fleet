@@ -70,12 +70,12 @@ func TestReplaceSlotPicksTheLastFocusedWallPane(t *testing.T) {
 	if got, ok := ReplaceSlot(ps); ok {
 		t.Errorf("pinned slot reused: %q", got)
 	}
-	// Focus came from the supervisor, or never left the overview.
+	// Focus came from the admiral, or never left the overview.
 	ps[1].Pin, ps[1].Last = false, false
 	if got, ok := ReplaceSlot(ps); ok {
 		t.Errorf("no last pane, got %q", got)
 	}
-	// The last pane is not on the wall (supervisor/overview).
+	// The last pane is not on the wall (admiral/overview).
 	if got, ok := ReplaceSlot([]tmux.PaneInfo{{ID: "%9", Role: "ov", Last: true}}); ok {
 		t.Errorf("non-wall slot reused: %q", got)
 	}
@@ -167,7 +167,7 @@ func TestEmphasisFocusHeldAgainstCandidates(t *testing.T) {
 		t.Errorf("after the focus hold the waiting pane wins, got %q", got)
 	}
 	// ... and the hold survives looking away: I focus %1, then click the
-	// supervisor, which is not a wall pane at all. %1 must keep emphasis.
+	// admiral, which is not a wall pane at all. %1 must keep emphasis.
 	at = now.Add(-5 * time.Second)
 	pick, byFocus := chooseEmphasis(ps, "%sup", "%sup", "%1", true, at, now)
 	if pick != "%1" || !byFocus {

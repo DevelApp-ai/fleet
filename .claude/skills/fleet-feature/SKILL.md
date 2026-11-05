@@ -5,7 +5,7 @@ description: Builds one feature of the fleet TUI/CLI in this repo end to end - s
 
 # fleet-feature
 
-You are the orchestrator. Subagents write the code; you keep the brief, the checks and the user in the loop. Keep chat replies short.
+You are the api-service. Subagents write the code; you keep the brief, the checks and the user in the loop. Keep chat replies short.
 
 ## 1. Find the spec (no code yet)
 - Look the feature up in `DESIGN.md` (roadmap §18, requirements §0, CLI §4, keys §5, ADRs §14). Use `grep -n`; do not read the whole file.
@@ -27,19 +27,20 @@ Copy `brief-template.md` (next to this file) to `.work/briefs/<slug>.md` and fil
 
 ## 5. Docs and commit
 - DESIGN.md: mark the item built (§18 table or §9), record any new decision as an ADR in §14.
+- `CHANGELOG.md`: one line for the user-facing change under today's date, newest first (what the user can do now, ADR in brackets). It is embedded; `Alt-g` shows it.
 - `AGENTS.md`: only if a command or rule changed. Keep it short.
-- `fleet --help` usage text and `internal/mcp/instructions.md` (supervisor rules) if the CLI or MCP surface changed.
-- Commit locally with a clear message and the Co-authored-by trailer. Never push.
+- `fleet --help` usage text and `internal/mcp/instructions.md` (admiral rules) if the CLI or MCP surface changed.
+- Commit locally with a clear message and an `Assisted-by:` trailer (see AGENTS.md; never an AI `Co-authored-by:`). Never push.
 
 ## 6. Roll out to the live fleet
 The user runs real agents on tmux socket `fleet`. Never kill that server.
 - `make install` keeps `~/.local/bin/fleet` pointing at `bin/fleet`, so new CLI commands are live after `make build`.
 - Overview TUI changed: `tmux -L fleet respawn-pane -k -t <ov pane> fleet ui` (find it with `tmux -L fleet list-panes -a -F '#{pane_id} #{@role}'`). Safe; it holds no state.
-- MCP server or supervisor flags changed: the supervisor must restart, which loses its chat. **Ask first.**
+- MCP server or admiral flags changed: the admiral must restart, which loses its chat. **Ask first.**
 - tmux key bindings changed: `fleet up` re-applies them, or run the bind commands against `-L fleet`.
 
 ## 7. Report
-Three to six lines: what works now, how to try it (one command), commit hash, anything the user must do (e.g. restart the supervisor). No process narration.
+Three to six lines: what works now, how to try it (one command), commit hash, anything the user must do (e.g. restart the admiral). No process narration.
 
 ## Rules
 - Real claude/copilot/agy/vibe agents are never spawned by tests or by you while checking. Use `fleet spawn --fake` and `fleet-test-*` sockets.

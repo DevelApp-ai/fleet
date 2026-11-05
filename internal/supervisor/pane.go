@@ -7,7 +7,7 @@ import (
 )
 
 // ErrNoPane is returned when the main window has no @role=sup pane.
-var ErrNoPane = fmt.Errorf("no supervisor pane; run fleet up")
+var ErrNoPane = fmt.Errorf("no admiral pane; run fleet up")
 
 // FindPane returns the @role=sup pane in target (e.g. "fleet:main").
 func FindPane(t *tmux.Client, target string) (string, error) {
@@ -24,7 +24,7 @@ func FindPane(t *tmux.Client, target string) (string, error) {
 }
 
 // Current returns session.json, or a record with only the session ID taken
-// from the supervisor pane's start command when session.json is missing.
+// from the admiral pane's start command when session.json is missing.
 func Current(home string, t *tmux.Client, target string) Session {
 	if s, ok := Load(home); ok {
 		return s
@@ -37,7 +37,7 @@ func Current(home string, t *tmux.Client, target string) Session {
 	return Session{SessionID: SessionIDFromCommand(cmd), PaneID: pane}
 }
 
-// CurrentFill is Fill for the current supervisor.
+// CurrentFill is Fill for the current admiral.
 func CurrentFill(home string, t *tmux.Client, target string) (used, max int, ok bool) {
 	return Fill(CopilotHome(), Current(home, t, target).SessionID)
 }

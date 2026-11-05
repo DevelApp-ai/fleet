@@ -12,7 +12,7 @@ import (
 )
 
 // fromOutsideTheWall makes the last-focused pane a non-wall pane (I came from
-// the supervisor), so Show takes the class/LRU fallback instead of reusing the
+// the admiral), so Show takes the class/LRU fallback instead of reusing the
 // slot I just left (DESIGN §5b.1).
 func fromOutsideTheWall(t *testing.T, c *tmux.Client, w *Wall) {
 	t.Helper()
@@ -110,7 +110,7 @@ func TestHideFocused(t *testing.T) {
 	}
 }
 
-// setupWall makes a main window with a supervisor, an overview and n agent
+// setupWall makes a main window with an admiral, an overview and n agent
 // panes in hidden windows, on a throwaway socket.
 func setupWall(t *testing.T, n int) (*tmux.Client, *Wall, []string) {
 	t.Helper()
@@ -180,7 +180,7 @@ func TestShowRefusesWhenEveryPaneNeedsAttention(t *testing.T) {
 
 // Finding 3: `mouse on` lets the user drag borders, so the real layout drifts
 // from the cached @fleet_layout. An explicit apply must force a real
-// select-layout (and the supervisor resize that follows it); only the
+// select-layout (and the admiral resize that follows it); only the
 // refresh-driven ApplyCached may trust the cache.
 func TestApplyForcesThroughADriftedCache(t *testing.T) {
 	c, w, agents := setupWall(t, 3)
@@ -202,7 +202,7 @@ func TestApplyForcesThroughADriftedCache(t *testing.T) {
 		return strings.TrimSpace(out)
 	}
 	want := supW()
-	// The user drags the supervisor border; the rendered layout is unchanged,
+	// The user drags the admiral border; the rendered layout is unchanged,
 	// so @fleet_layout still matches and a cached apply is a no-op.
 	c.Run("resize-pane", "-t", s.Sup, "-x", "60")
 	if supW() == want {

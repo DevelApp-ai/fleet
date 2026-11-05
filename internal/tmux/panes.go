@@ -31,6 +31,12 @@ func (c *Client) SetPaneOption(pane, key, val string) error {
 	return err
 }
 
+// UnsetPaneOption removes a pane-level option.
+func (c *Client) UnsetPaneOption(pane, key string) error {
+	_, err := c.Run("set-option", "-p", "-u", "-t", pane, key)
+	return err
+}
+
 // Capture returns the visible text of a pane (last n lines if n>0).
 func (c *Client) Capture(pane string, n int) (string, error) {
 	args := []string{"capture-pane", "-p", "-J", "-t", pane}
@@ -77,9 +83,13 @@ type PaneInfo struct {
 	StatusSince            int64  // @fleet_status_since (unix nanoseconds)
 	Pin                    bool   // @fleet_pin == "1"
 	Last                   bool   // #{pane_last}: the pane focus came from
+	Team                   string // @fleet_team
+	TeamColor              string // @fleet_team_color
+	DeadStatus             string // #{pane_dead_status}: exit code, "" if alive or killed by a signal
+	DeadSignal             string // #{pane_dead_signal}: signal number, "" if none
 }
 
-const paneFmt = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{@fleet_agent}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{@fleet_used}\t#{@role}\t#{@fleet_status}\t#{@fleet_status_since}\t#{@fleet_pin}\t#{pane_last}"
+const paneFmt = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{@fleet_agent}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{@fleet_used}\t#{@role}\t#{@fleet_status}\t#{@fleet_status_since}\t#{@fleet_pin}\t#{pane_last}\t#{@fleet_team}\t#{@fleet_team_color}\t#{pane_dead_status}\t#{pane_dead_signal}"
 
 // ListPanes lists panes; target "" means all (-a), otherwise -t target (a window).
 func (c *Client) ListPanes(target string) ([]PaneInfo, error) {
@@ -115,6 +125,12 @@ func (c *Client) ListPanes(target string) ([]PaneInfo, error) {
 		}
 		if len(f) > 14 {
 			p.Last = f[14] == "1"
+		}
+		if len(f) > 16 {
+			p.Team, p.TeamColor = f[15], f[16]
+		}
+		if len(f) > 18 {
+			p.DeadStatus, p.DeadSignal = f[17], f[18]
 		}
 		ps = append(ps, p)
 	}

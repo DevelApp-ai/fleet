@@ -6,6 +6,7 @@ package prefs
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,16 +25,64 @@ type Spawn struct {
 	AutoSubmit   bool          // press Enter after a pasted prompt
 	ReadyTimeout time.Duration // how long to wait for the TUI
 	ExtraArgs    []string      // appended to the launch argv
+	// AutoCloseDone closes an agent that reports done with a clean, merged
+	// work tree (DESIGN §6.7).
+	AutoCloseDone bool
+	// AutoCloseIdle, with AutoCloseDone, closes a done agent that has sat
+	// idle this long once its work passes the auto-close check (0 = off).
+	AutoCloseIdle time.Duration
+	// Env is added to the agent pane's environment, over the profile's own
+	// env. [profile.<name>] keys override [defaults] keys one by one.
+	Env map[string]string
+	// Playbook prepends the fleet worker playbook to a spawn's first prompt
+	// (DESIGN §4, ADR-22).
+	Playbook bool
+	// DeadPaneGrace is how long a crashed agent's dead pane stays before it
+	// is closed (DESIGN §6.7, ADR-33): 0 = at once, GraceOff = never.
+	DeadPaneGrace time.Duration
 }
 
-// Neutral is the built-in default: no mode, auto-submit, DefaultReadyTimeout.
-func Neutral() Spawn { return Spawn{AutoSubmit: true, ReadyTimeout: DefaultReadyTimeout} }
+// GraceOff is DeadPaneGrace for dead_pane_grace = "off".
+const GraceOff time.Duration = -1
+
+// DefaultDeadPaneGrace is dead_pane_grace when unset.
+const DefaultDeadPaneGrace = 5 * time.Minute
+
+// Neutral is the built-in default: no mode, auto-submit, DefaultReadyTimeout,
+// worker playbook on, DefaultDeadPaneGrace.
+func Neutral() Spawn {
+	return Spawn{AutoSubmit: true, ReadyTimeout: DefaultReadyTimeout, Playbook: true, DeadPaneGrace: DefaultDeadPaneGrace}
+}
+
+// DefaultMaxWorking caps how many agents may be working at once before new
+// spawns queue (DESIGN §7a). 0 in config.toml turns the cap off.
+const DefaultMaxWorking = 4
 
 // Prefs is a loaded config file.
 type Prefs struct {
-	Path     string // file it came from (may not exist)
-	defaults Spawn
-	profiles map[string]map[string]conf.Value
+	Path       string // file it came from (may not exist)
+	defaults   Spawn
+	profiles   map[string]map[string]conf.Value
+	maxWorking int
+	admiral    string
+	agentMail  string
+}
+
+// AdmiralProfile is [admiral] profile: the admiral's tool profile when no
+// flag, env or last choice names one (DESIGN §6.10). "" = unset.
+func (p *Prefs) AdmiralProfile() string {
+	if p == nil {
+		return ""
+	}
+	return p.admiral
+}
+
+// MaxWorking is [defaults] max_working: the working-agent cap, 0 = no cap.
+func (p *Prefs) MaxWorking() int {
+	if p == nil {
+		return DefaultMaxWorking
+	}
+	return p.maxWorking
 }
 
 // Load reads the config file. A missing file is not an error.
@@ -43,9 +92,22 @@ func Load() (*Prefs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	p := &Prefs{Path: path, defaults: Neutral(), profiles: map[string]map[string]conf.Value{}}
+	p := &Prefs{Path: path, defaults: Neutral(), profiles: map[string]map[string]conf.Value{}, maxWorking: DefaultMaxWorking}
 	if sec, ok := d["defaults"]; ok {
 		p.defaults = applySpawn(p.defaults, sec)
+		if v := conf.Str(sec, "max_working"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("%s: max_working %q: want a whole number >= 0", path, v)
+			}
+			p.maxWorking = n
+		}
+		if p.agentMail, err = parseAgentMail(sec); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if sec, ok := d["admiral"]; ok {
+		p.admiral = strings.TrimSpace(conf.Str(sec, "profile"))
 	}
 	for name, sec := range d {
 		if n, ok := strings.CutPrefix(name, "profile."); ok && n != "" {
@@ -88,11 +150,35 @@ func applySpawn(s Spawn, sec map[string]conf.Value) Spawn {
 	if v, ok := conf.Bool(sec, "auto_submit"); ok {
 		s.AutoSubmit = v
 	}
+	if v, ok := conf.Bool(sec, "auto_close_done"); ok {
+		s.AutoCloseDone = v
+	}
+	if v, ok := conf.Dur(sec, "auto_close_idle"); ok && v >= 0 {
+		s.AutoCloseIdle = v
+	}
+	if v, ok := sec["dead_pane_grace"].(string); ok && strings.EqualFold(strings.TrimSpace(v), "off") {
+		s.DeadPaneGrace = GraceOff
+	} else if v, ok := conf.Dur(sec, "dead_pane_grace"); ok && v >= 0 {
+		s.DeadPaneGrace = v
+	}
+	if v, ok := conf.Bool(sec, "playbook"); ok {
+		s.Playbook = v
+	}
 	if v, ok := conf.Dur(sec, "ready_timeout"); ok && v > 0 {
 		s.ReadyTimeout = v
 	}
 	if v, ok := sec["extra_args"]; ok {
 		s.ExtraArgs, _ = v.([]string)
+	}
+	if m := conf.Map(sec, "env"); len(m) > 0 {
+		env := make(map[string]string, len(s.Env)+len(m))
+		for k, v := range s.Env {
+			env[k] = v
+		}
+		for k, v := range m {
+			env[k] = v
+		}
+		s.Env = env
 	}
 	return s
 }

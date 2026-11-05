@@ -49,7 +49,7 @@ func chooseEmphasis(ps []tmux.PaneInfo, active, prev, cur string, curFocus bool,
 		return fallback()
 	}
 	// A pane I chose myself keeps emphasis for EmphasisFocusHold wherever the
-	// active pane wanders to afterwards (clicking the supervisor must not
+	// active pane wanders to afterwards (clicking the admiral must not
 	// re-tile the pane I just picked).
 	if curFocus && now.Sub(at) < EmphasisFocusHold {
 		return cur, true

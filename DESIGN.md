@@ -1,6 +1,6 @@
 # ai-fleet: one place to see and steer every agent session
 
-Status: written 2026-11-04 from a planning conversation, before any code. Slices 0–3 and the MCP server are built; see the README for what works today. Everything else here is planned.
+Status: design only, nothing built yet. Written 2026-11-04 from a planning conversation.
 Section 0 lists every requirement I stated. Sections 1–7 and 5a are the design we discussed. Section 8 lists additions that came up while writing. Section 14 records the decisions and why.
 
 ---
@@ -31,7 +31,7 @@ What I asked for, in my own terms. Each one is tagged so the design and decision
 | R18 | Modular: features can be added or removed without touching the rest | §10, §15 |
 | R19 | Ready to change direction at short notice | §9 |
 | R20 | Works with every tool variant I use: copilot, claude-copilot, claude, claude-personal, claude-work, agy, vibe. Profiles live in a data file, not hard-coded | §4 |
-| R21 | Copilot is the main supervisor session for now | §6 |
+| R21 | Copilot is the main admiral session for now | §6 |
 
 ---
 
@@ -44,23 +44,23 @@ I often run up to 40 agent sessions at once (GitHub Copilot CLI, Claude Code, ag
 3. **Agents don't share context.** I carry the overall plan in my head and pass it between agents by hand.
 4. **Starting work takes manual setup.** Splitting a task across agents means opening terminals, picking directories and pasting prompts myself.
 5. **RAM runs out.** Measured on 2026-11-04 (30 GB machine): a Copilot session uses 400–540 MB and a Claude or agy session 250–280 MB. 19 sessions used about 4.6 GB, so 40 would use about 15–20 GB.
-6. **A central agent would get flooded.** If one supervisor session reads raw output from 40 agents, its context fills with unrelated material and its judgement gets worse.
+6. **A central agent would get flooded.** If one admiral session reads raw output from 40 agents, its context fills with unrelated material and its judgement gets worse.
 
 What I want is one place to talk to, which can see every agent and act on them for me: report state, answer or nudge agents, start new ones and coordinate multi-step work. That is a **control plane with an LLM in it**, not just a session switcher.
 
 ### Is this a known pattern?
 
-Yes. It is usually called the supervisor (or orchestrator) and worker pattern. Existing tools such as agent-deck, claude-squad, Vibe Kanban and Crystal are mostly session managers: they make switching between agents faster, but no LLM supervises the others. agent-deck felt wrong for exactly that reason. It improves navigation but leaves all the supervising to me.
+Yes. It is usually called the supervisor (or api-service) and worker pattern. Existing tools such as agent-deck, claude-squad, Vibe Kanban and Crystal are mostly session managers: they make switching between agents faster, but no LLM supervises the others. agent-deck felt wrong for exactly that reason. It improves navigation but leaves all the supervising to me.
 
 ---
 
 ## 2. Design principles
 
-1. **tmux does the work underneath.** Every agent runs in a named tmux window. The tmux server survives if the TUI or the supervisor crashes. No custom terminal handling.
-2. **One CLI, two front ends.** The `fleet` CLI is the only thing that touches tmux and state. The TUI uses it, and so does the supervisor LLM. Anything I can do, the supervisor can do, and the reverse.
+1. **tmux does the work underneath.** Every agent runs in a named tmux window. The tmux server survives if the TUI or the admiral crashes. No custom terminal handling.
+2. **One CLI, two front ends.** The `fleet` CLI is the only thing that touches tmux and state. The TUI uses it, and so does the admiral LLM. Anything I can do, the admiral can do, and the reverse.
 3. **State lives on disk, not in any chat.** If something isn't written to the board, it doesn't exist.
-4. **The supervisor is stateless and can be thrown away.** Resetting it costs seconds and loses nothing.
-5. **Raw output never reaches the supervisor.** Agent output is summarised by a cheap model first.
+4. **The admiral is stateless and can be thrown away.** Resetting it costs seconds and loses nothing.
+5. **Raw output never reaches the admiral.** Agent output is summarised by a cheap model first.
 6. **Parked is the normal state, not live.** Idle agents give up their process and resume on demand.
 7. **Visual first, keyboard and mouse driven.** Colour and motion tell me where to look. Arrow keys or a click get me there.
 8. **Let native code do the heavy lifting.** tmux (written in C) and the terminal emulator draw the live sessions. The fleet binary only draws the overview, and only redraws when something changes.
@@ -71,7 +71,7 @@ Yes. It is usually called the supervisor (or orchestrator) and worker pattern. E
 
 ```
 ┌───────────────────────────── fleet TUI (Go) ──────────────────────────────────┐
-│  grid of tiles  ·  attention queue  ·  supervisor pane  ·  status bar          │
+│  grid of tiles  ·  attention queue  ·  admiral pane  ·  status bar          │
 └───────────────┬───────────────────────────────────────────────┬────────────────┘
                 │ calls                                         │ calls
                 ▼                                               ▼
@@ -82,7 +82,7 @@ Yes. It is usually called the supervisor (or orchestrator) and worker pattern. E
                ▼
    tmux session "fleet": window per agent ── copilot | claude | agy | vibe
                                                    ▲
-   supervisor = one more agent (copilot), uses fleet CLI via bash
+   admiral = one more agent (copilot), uses fleet CLI via bash
 ```
 
 ### State layout (`~/.fleet/`)
@@ -91,7 +91,9 @@ Yes. It is usually called the supervisor (or orchestrator) and worker pattern. E
 |---|---|
 | `board.json` | One entry per agent: name, tool, repo/dir, goal, status, blocker, session ID, live/parked, last activity, RAM |
 | `agents/<name>.md` | Agent card: goal, what's done, current step, next step, open questions. 10–30 lines, rewritten (not appended). |
-| `decisions.log` | Append-only, one line each: timestamp, who decided (me or the supervisor), what, for which agent |
+| `decisions.log` | Append-only, one line each: timestamp, who decided (me or the admiral), what, for which agent |
+| `teams.json` | Teams: colour and members (§5c); separate from `board.json` so older binaries can't drop it |
+| `admiral/` | The admiral's `session.json`, `handoff.md`, `handoffs/` and `reset.lock` (§6.5). `supervisor/` is a symlink to it for binaries from before ADR-26 |
 | `events.jsonl` | Status transitions (for the TUI animation, notifications and later analysis) |
 | `peek-cache/<name>.txt` | Last summary of each agent and the hash of the pane it was made from |
 
@@ -114,12 +116,13 @@ Where the ID can't be set at launch, `fleet` has to find it after the start. It 
 |---|---|
 | `fleet spawn <name> <tool> <dir> ["prompt"]` | New tmux window, starts the tool, records the session ID, creates the card |
 | `fleet ls [--json]` | All agents with status, live/parked and RAM |
-| `fleet peek <name> [--raw] [-n 200]` | Default: a summary of about 5 lines from a cheap model. `--raw`: the actual pane text (for me, not the supervisor). |
+| `fleet peek <name> [--raw] [-n 200]` | Default: a summary of about 5 lines from a cheap model. `--raw`: the actual pane text (for me, not the admiral). |
 | `fleet send <name> "text"` | Paste into the agent and press Enter |
 | `fleet park <name>` | Ask the agent to update its card, wait, stop the process, mark it parked |
 | `fleet wake <name>` | Restart with the tool's resume flag in the same tmux window |
 | `fleet close <name>` | Stop it and archive the card (`kill` is a hidden alias) |
 | `fleet note <name> "text"` | Add an entry to `decisions.log` |
+| `fleet team <action> <team> ...` | ✅ built (2026-11-05) Create/delete teams, add/remove agents, set the colour, and send/show/hide/close a whole team (see §5c) |
 | `fleet adopt [--name N] [--force] <profile> <session-id> [dir]` | Bring an existing session (started outside fleet) under management by resuming it in tmux (see below) |
 
 ### `fleet adopt`
@@ -179,6 +182,36 @@ patterns = "copilot"
 - `auto_submit = false` also disables launch-time prompt delivery: `copilot -i <prompt>` submits the prompt itself, so honouring "paste but don't press Enter" means falling back to the paste path.
 - A `[profile.<name>]` section that neither names an existing profile nor sets `command` is ignored with a warning, so a typo like `[profile.coplot]` cannot create a command-less profile.
 - Out of scope: changing the mode of an already running agent, and a CLI flag per spawn.
+
+### Worker playbook: the process every spawned agent gets (ADR-22, built)
+
+On 2026-11-05 the admiral repeated the same process rules in every prompt, and agents still broke them: one pushed during a push hold, some waited on choices the user had already delegated, a test fixture nearly leaked private data, and parallel agents edited the same files. `fleet spawn` now prepends a short **worker playbook** to the first prompt, so every new agent gets the process with no one having to remember it.
+
+- **What an agent receives:** the playbook, then `## Your task`, then the prompt. The default text is `internal/playbook/worker.md` (about 35 lines): read-only tasks edit nothing; one worktree per agent at `../<repo>.wt/<name>`; plan the files first and check `fleet touching` for overlap, deferring to a named coordinator on merge order; own your area and name your dependencies; decide rather than wait when a choice was delegated; escalate `blocked` early; keep scope (extra work becomes a follow-up in the report); test first when cheap, with real but scrubbed fixtures; a six-step pre-merge checklist (build/vet/tests, subagent review, docs/ADR, clean diff, conventional commit with `Assisted-by:`, merge into local main and remove the worktree); never push or rewrite history; stop on merge conflicts unless told to use best judgment; finish with `fleet_report` (or `fleet report` from a shell; no marker lines, ADR-20) with optional `next:`, `risks:`, `decisions:` and `retro:` detail lines. Why each rule is there: `docs/process.md` (ADR-35).
+- **Layers**, applied in order, each appended after a blank line: built-in → `~/.fleet/worker.md` (the user's own rules) → `.fleet/worker.md` in the agent's repo, found by walking up from the spawn dir to the first directory with a `.git` entry (so a worktree finds its committed copy). A file whose first line is `<!-- fleet:replace -->` replaces everything before it; a replace file with nothing else switches the playbook off for that repo.
+  This repo's own `.fleet/worker.md` adds the real done-check (`make test` always exits 0) and the test-socket rules.
+- **Off switch:** `playbook = false` in `[defaults]` or `[profile.<name>]` of the local `config.toml`.
+- **Inspect:** `fleet playbook [dir]` prints the effective text for a directory, with its sources on stderr.
+- **Conflict check:** `fleet touching [-C dir] [--json] [file...]` lists the files every other worktree of the repo changes (committed on its branch since the merge base with `main`, plus uncommitted). With file arguments it prints only the overlap and exits 1 when there is one (0 none, 2 error, so a failed check never reads as all-clear); it works as a pre-edit check. Committed renames report both paths.
+- The board's goal stays the user's prompt, not the playbook, and the logged argv redacts the whole composed prompt. tmux refuses a launch command over about 16 KB, so when the composed prompt would push it past 12 KB, spawn sends it by the paste path instead of as an argument.
+- Not covered: a spawn without a prompt (nothing to prepend to, so the admiral always spawns with the task as the prompt), and adopted sessions (they keep their own context).
+- The admiral relies on the playbook: its prompts give the task, the owner boundaries and any exceptions, not the process rules (`internal/mcp/instructions.md`).
+- Two of the day's failures are spawn mechanics, not process, and a prompt can't fix them: agents in Manual Approval mode blocking on path-access prompts for their own worktree, and pasted prompts left unsubmitted. They belong with spawn options (ADR-13, fleet-mcp).
+
+What the playbook took from established practice (checked 2026-11-05), and what it left out:
+
+| Practice | In the playbook as | Left out |
+|---|---|---|
+| Definition of done | The six-step pre-merge checklist, with checks the agent runs itself | Coverage targets, sign-off roles |
+| Small, PR-sized changes | "one small, reviewable change"; one worktree and branch per agent | Stacked PRs (local main only, nothing to stack on) |
+| TDD | "failing test first when cheap"; real captured fixtures for parsers | Mandatory TDD for every change |
+| Conventional commits | `feat:`/`fix:`/`docs:` subject plus `Assisted-by:` | Scopes, breaking-change footers, changelog tooling |
+| ADRs | "a decision others will ask why about gets a short ADR" (repo's own ADR list) | A separate ADR directory and template |
+| Review checklist | A subagent review of the diff before merging, plus the clean-diff item | A long checklist (agents skim long docs) |
+| Agent practice: plan first, scoped context, verification loop | Plan the files and the check before editing; quote the command that passed | Plan-mode approval gates (they stalled agents today) |
+| Agent practice: ask vs. assume | Decide when delegated; ask only for scope, public or irreversible steps | — |
+| Agent practice: handoffs | `fleet_report` with done/blocked/question and a summary: headline line, optional detail lines (ADR-20) | Free-form status chatter |
+
 ### Finding sessions to adopt: `fleet sessions`
 
 Nobody remembers session IDs. Fleet finds them from the tools' own session stores, so adopt works with words.
@@ -188,7 +221,7 @@ Nobody remembers session IDs. Fleet finds them from the tools' own session store
 - Hidden unless `--all`: sessions with no user prompt (hook and probe runs) and sessions already on the board.
 - `words`: case-insensitive, every word must appear in title, dir, branch or ID.
 - `fleet adopt [--name N] [--dir D] [--force] [profile] <id | words...>`: the profile is optional (suggested one is used). An exact ID or a unique ID prefix of at least 8 characters adopts that session; otherwise the words search, leaving out sessions in use or on the board. One match is adopted, none or several is an error that lists up to 5 candidates. A positional dir after an exact ID still works.
-- MCP: `fleet_sessions` (optional `query`, `limit`) returns one line per session; `fleet_adopt` takes `session_id` or `query`, `profile` optional. Supervisor rule: on "adopt my X session" call `fleet_sessions` with the user's words, ask which one if more than one, then `fleet_adopt` with the ID.
+- MCP: `fleet_sessions` (optional `query`, `limit`) returns one line per session; `fleet_adopt` takes `session_id` or `query`, `profile` optional. Admiral rule: on "adopt my X session" call `fleet_sessions` with the user's words, ask which one if more than one, then `fleet_adopt` with the ID.
 - Reading is bounded: only the newest sessions are opened, and at most the first 256 KB of a transcript is read.
 - In use = a live Copilot `inuse.<pid>.lock`, or a process with the ID as a whole argument (tmux and screen servers are ignored: they keep the command they were started with).
 - Built 2026-11-04.
@@ -207,16 +240,42 @@ Status is read from the bottom of the pane each poll (every 1–2 seconds):
 | idle | turn finished: empty input box and the tool's idle footer, nothing asked |
 | parked | no process; resumes on demand |
 
-How the patterns are applied (`internal/status`, per-tool sets in `patterns.toml` with keys `waiting`, `error`, `working`, `idle`, `transcript`):
+How the patterns are applied (`internal/status`, per-tool sets in `patterns.toml` with keys `waiting`, `error`, `working`, `idle`, `transcript`, `pending`):
 
 - Only the last 14 non-empty lines are read: enough for a question form or approval box plus the footer under it.
 - **waiting wins anywhere in that window.** A Copilot approval box ("Do you want to run this command?", "↑/↓ to navigate · enter to select · esc to cancel") or question form ("Copilot needs information.", "↑/↓ select · enter accept …") can sit above a footer that still says "Working". The line matched by the first `waiting` pattern in list order becomes `waiting_for` (with the question under "needs information." appended).
 - `transcript` marks lines of the scrolling conversation (Copilot: lines ending in the right-hand scrollbar `┃`). A waiting pattern there only counts on the transcript's last content line, so prompt text an agent quoted earlier in its work doesn't make it look blocked.
 - Otherwise the **bottom-most** line matching `error`, `working` or `idle` decides — normally the tool's footer. Copilot: busy is "● Working · … esc esc interrupt"; idle is the mode footer ("Interactive · Allow All · / commands · space hold to record") without "Working". Picker hints like "esc to cancel" mean waiting, never working.
+- `pending` marks text pasted into the input box but not submitted (Copilot: `'^┃ \[Paste #\d+'`, the `[Paste #1 - 13 lines]` chip on the input-box row). Checked after `waiting`, on non-transcript lines of the same window: a match is `waiting` with `waiting_for` "unsubmitted input: [Paste #1 - 13 lines]". Claude has no `pending` pattern yet (no captured fixture of its paste chip).
 - tmux's "Pane is dead (status …)" banner, or a dead pane, is always `error`.
 - `fleet refresh` tags the pane (`@fleet_status`, shown in the pane title) on every transition, and re-syncs the tag whenever it differs from the board.
 
 Hooks are better where they exist. Claude Code and Copilot can run hooks on events such as "turn finished" and "needs permission". Those hooks can write status straight to the board, which is more reliable than scraping. Use scraping as the fallback that works with every tool.
+
+### Subagents (built)
+
+An agent that launches subagents (Copilot's `task` tool: builder, reviewer, explore …) shows one dot per subagent on the bottom row of its overview tile.
+
+Source: the tool's own session event log, not the pane. The pane only holds the visible screen, so a subagent's "○ Read (id) Waiting for result…" line scrolls away while the subagent still runs, and a background subagent shows nothing at all once its `task` call returns. Copilot writes every subagent to `~/.copilot/session-state/<id>/events.jsonl` (checked on 737 local sessions, 2026-11-05):
+
+| Event | Meaning |
+|---|---|
+| `subagent.started` (`data.toolCallId`, `agentId`, `data.agentName`) | running |
+| `subagent.completed` | done; `data.cancelled: true` means stopped → failed |
+| `tool.execution_complete` of that `toolCallId` with `success: false` | failed |
+| `tool.execution_start` of `write_agent` (`agent_id` / `agent_ids`) | that finished subagent runs again (restored from the remembered `agentId` if already pruned; an unknown id does nothing) |
+| `assistant.message` with that subagent's `agentId` and no `data.toolRequests`, then its `assistant.turn_end` | its final answer → done at the turn end. A later message with tool requests in the same turn cancels it (about 1 in 5 tool-less messages are mid-turn). After a re-wake this is often the only end signal (13 of 55 local re-wakes logged no second `subagent.completed`) |
+| `assistant.turn_start` with the `agentId` of a finished (or pruned but known) subagent | running again. Catches a message queued while the subagent was busy, which restarts it right after its final turn with no `write_agent` in the log |
+| `session.start` / `session.resume` / `session.shutdown` | anything still running died with the process → failed |
+
+- The log path is profile data: `subagent_log = "~/.copilot/session-state/{id}/events.jsonl"` (Copilot profiles only for now). Agents without a session id, or tools without the key, show no dots.
+- `fleet refresh` reads only the bytes added since the last poll (offset kept on the board; a shorter file restarts from 0) and only decodes lines that mention a subagent, `write_agent`, a running `toolCallId`, or an `assistant.message`/`assistant.turn_end` carrying a running subagent's `"agentId"`, or an `assistant.turn_start` carrying a finished or known one's. A partial last line waits for the next poll. If tmux can't list panes, the poll leaves subagents alone.
+- Kept on the board per agent: running subagents, plus finished ones for 5 minutes after they end (at most 12 in total; oldest finished go first), and the last 32 `agentId` → launch mappings (`sub_known`) so a late `write_agent` can bring a pruned one back. An agent whose pane is gone or dead has no running subagents.
+- Tile: line 4, `•` per subagent, in start order. Running: green, with a slow wave across the running dots (dim step: dark green `#628067`, never grey, so it can't be mistaken for a done dot) (one step per 300 ms on the existing 100 ms animation tick; colour only, the row never changes width, so no flicker). Done: grey. Failed or cancelled: red. More dots than fit: the newest that fit, then `+N`. No row when there are none.
+- `fleet_status` gets a `subagents` column: running count (blank when 0). `fleet ls --json` carries the board's `subagents` list.
+- Limit: an adopted session whose Copilot process had crashed shows its old subagents green until the resumed process logs `session.resume`, then red for 5 minutes.
+- Limit: a second process resuming the same session marks running subagents failed; one that keeps working turns green again at its next turn (seen once in 667 local logs, about 11 seconds red).
+- Out of scope: Claude Code's `Task` tool (its transcript has the same information; needs its own parser), dots on chips and wall borders, nested subagents beyond what the parent log records.
 
 ---
 
@@ -228,15 +287,15 @@ Built in **Go with Bubble Tea and Lip Gloss** (see ADR-10). It's one binary, the
 
 ```
 ┌ fleet ─ 31 agents · 9 live · 22 parked · RAM 4.1/30 GB · ⚠ 3 waiting ───────────────┐
-│ ┌─ api-auth ───────┐ ┌─ web-nav ────────┐ ┌─ infra-dns ──────┐ ┌─ db-migrate ─────┐ │
+│ ┌─ api-auth ──────┐ ┌─ web-nav ──┐ ┌─ infra-dns ─────┐ ┌─ db-migrate ────┐ │
 │ │ 🟢 ⠹ copilot      │ │ 🟡 ● claude      │ │ 🔴 ✖ agy          │ │ 💤 vibe          │ │
-│ │ api              │ │ web              │ │ infra            │ │ db               │ │
-│ │ running go test  │ │ approve: npm test│ │ plan failed      │ │ parked 2h        │ │
+│ │ api-service     │ │ web-ui        │ │ infra-repo  │ │ db-tools...... │ │
+│ │ running go test  │ │ approve: npm test│ │ kustomize failed │ │ parked 2h        │ │
 │ │ 512 MB · 3m      │ │ 280 MB · wait 4m │ │ 260 MB · 12m     │ │ —                │ │
 │ └──────────────────┘ └──────────────────┘ └──────────────────┘ └──────────────────┘ │
 │  … more rows, grouped by repo …                                                      │
-├ supervisor ─ ctx 34% 🟢 ─────────────────────────────────────────────────────────────┤
-│ > 3 agents are waiting. web-nav wants to run `npm test` — approve?                  │
+├ admiral ─ ctx 34% 🟢 ─────────────────────────────────────────────────────────────┤
+│ > 3 agents are waiting. web-nav wants to run `npm test` — approve?            │
 └ ←↑↓→ move · ⏎ attach · Tab next waiting · s send · p peek · z park · ? help ─────────┘
 ```
 
@@ -249,7 +308,9 @@ Built in **Go with Bubble Tea and Lip Gloss** (see ADR-10). It's one binary, the
 | error / stuck | red | still border, ✖ icon; stuck also shows "no output 12m" |
 | idle / done | grey | dimmed, no motion |
 | parked | dark grey | 💤, no process, no RAM shown |
-| supervisor | own tile | context fill: green < 40%, yellow 40–69%, red ≥ 70% (built as the supervisor pane border label, §6.5) |
+| queued | dark grey | ⏸ and queue position, no process; starts when fewer than `max_working` agents are busy (§7a) |
+| subagents | per dot: green running, grey done, red failed | bottom row of the tile; a slow wave runs across the running dots (§4 Subagents) |
+| admiral | own tile | context fill: green < 40%, yellow 40–69%, red ≥ 70% (built as the admiral pane border label, §6.5) |
 
 Motion stays rare on purpose. If everything moves, nothing stands out. Only working tiles spin and only waiting tiles pulse.
 
@@ -266,8 +327,8 @@ Motion stays rare on purpose. If everything moves, nothing stands out. Only work
 | `n` | Spawn wizard: name, tool, directory, first prompt |
 | `z` / `w` | Park / wake |
 | `f` | Focus session on this agent (see 6.4) |
-| `c` | Move the cursor to the supervisor input |
-| `R` | Reset the supervisor, after a y/n confirm (see 6.3, 6.5; tmux `M-R` does the same) |
+| `c` | Move the cursor to the admiral input |
+| `R` | Reset the admiral, after a y/n confirm (see 6.3, 6.5; tmux `M-R` does the same) |
 | `/` | Filter tiles by name, repo or status |
 | `1`–`9` | Jump to a repo group |
 | `?` | Help overlay |
@@ -276,7 +337,7 @@ Motion stays rare on purpose. If everything moves, nothing stands out. Only work
 
 The bottom tmux status line and the overview header show a short hint in plain words, written with `Alt-` instead of tmux's `M-`. The full list is one keypress away:
 
-- **`Alt-?`** anywhere in the fleet tmux server opens a popup (`tmux display-popup`) with every hotkey, grouped by area (panes, wall, supervisor, overview), one line each. Any key closes it. `fleet keys` prints the same list in a terminal.
+- **`Alt-?`** anywhere in the fleet tmux server opens a popup (`tmux display-popup`) with every hotkey, grouped by area (panes, wall, review, admiral, overview), one line each. Any key closes it. `fleet keys` prints the same list in a terminal.
 - **`?`** in the overview opens the same list as an overlay; `q`, `Esc` or `?` closes it.
 - One registry (`internal/keys`) is the single source of truth: the status hint, the overview hint, the popup, the overlay, `fleet keys` and the generated table below come from it. Tests fail if a tmux `M-*` or `fleetwall` chord binding in `fleet up` is missing from the registry (or the reverse), or if the table below is out of date (`fleet keys --markdown` regenerates it).
 
@@ -290,22 +351,26 @@ The bottom tmux status line and the overview header show a short hint in plain w
 | Wall | `Alt-w 1/2/4/6/9/m` | same as Alt-1…9/m: Alt-w, let go, then the key |
 | Wall | `Alt-1/2/4/6/9` | wall: show up to N panes |
 | Wall | `Alt-m` | wall: one main pane + stack |
-| Supervisor | `Alt-s` | show/hide the supervisor |
-| Supervisor | `Alt-S` | move the supervisor left/right |
-| Supervisor | `Alt-R` | reset the supervisor to a fresh chat (asks y/n) |
+| Review | `Alt-g` | what's new in fleet: its latest features, unseen ones marked |
+| Admiral | `Alt-s` | show/hide the admiral |
+| Admiral | `Alt-S` | move the admiral left/right |
+| Admiral | `Alt-R` | reset the admiral to a fresh chat (asks y/n) |
+| Admiral | `Alt-P` | pick the admiral's profile (copilot, claude, …) |
 | Overview | `Alt-c` | overview: tiles ↔ compact chips |
 | Overview | `←↑↓→ / hjkl` | select a tile |
 | Overview | `⏎ / click` | show the selected agent on the wall |
 | Overview | `x` | take the selected agent off the wall |
 | Overview | `Tab` | jump to the next waiting agent |
+| Overview | `g` | same as Alt-g: what's new in fleet |
 | Overview | `1/2/4/6/9/m` | same as Alt-1…9 / Alt-m |
-| Overview | `R` | same as Alt-R: reset the supervisor (asks y/n) |
+| Overview | `R` | same as Alt-R: reset the admiral (asks y/n) |
+| Overview | `P` | same as Alt-P: pick the admiral's profile |
 | Overview | `q` | quit the overview |
 
 `Alt-?` (tmux) · `?` (overview): show this list.
 <!-- keys:end -->
 
-Out of scope: rebinding keys from config, mouse-clickable hints.
+Out of scope: rebinding keys from config.
 
 ---
 
@@ -314,19 +379,22 @@ Out of scope: rebinding keys from config, mouse-clickable hints.
 I want live session windows on a grid that I can click into, tiled across a large monitor. Drawing 40 live terminals inside the app itself would be slow. So the design splits the work between two layers:
 
 - **Overview (fleet binary):** small tiles for *all* agents, showing summaries only. Cheap to draw.
+  - Every agent gets a card while the pane has room: cards wrap onto as many rows as the height allows, taking more rows when that gets them to a comfortable width (`TileComfortW`, 34 columns), then share the pane width (26 to 48 columns, `internal/layout` `Tiles`).
+  - Text shortens, it doesn't just cut: the profile is cut before `status age`, and the last line loses brackets before it is truncated (`53% (105k/200k)` → `53% 105k/200k`).
+  - Only when the cards can't all fit does the last row become an overflow line, `+N hidden:` followed by clickable chips and `+k` for chips that don't fit. The card window scrolls so the selected agent always has a card. A pane too short for one card shows chips only.
 - **Live wall (tmux panes):** real, interactive terminals for the 1–9 agents I'm working with right now. tmux and the terminal emulator draw these, both written in native code.
 
 Everything sits in one tmux window, so one terminal window fills the monitor:
 
 ```
 ┌ overview (fleet) ─────────┬ live wall: real tmux panes ────────────────────────────┐
-│ 🟢 api-auth    🟡 web-nav │ ┌ web-nav (claude) ───────────┬ infra-dns (agy) ───────┐ │
-│ 🔴 infra-dns   💤 db-mig  │ │ Approve `npm test`? [y/n]   │ Error: plan failed in  │ │
-│ 🟢 ci-cache    ⚪ docs    │ │ █                           │ modules/dns            │ │
+│ 🟢 api-auth   🟡 web-nav  │ ┌ web-nav (claude) ─────┬ infra-dns (agy) ──────┐ │
+│ 🔴 infra-dns  💤 db-mig │ │ Approve `npm test`? [y/n]   │ Error: terraform plan │ │
+│ 🟢 ci-cache    ⚪ docs │ │ █                           │ failed in modules/dns │ │
 │ … 34 more, by repo …      │ ├─────────────────────────────┼────────────────────────┤ │
-│                           │ │ api-auth (copilot)          │ ci-cache (claude)      │ │
+│                           │ │ api-auth (copilot)         │ ci-cache (claude)│ │
 │                           │ │ ⠹ running go test ./...     │ ⠹ writing tests        │ │
-├ supervisor ───────────────┤ └─────────────────────────────┴────────────────────────┘ │
+├ admiral ───────────────┤ └─────────────────────────────┴────────────────────────┘ │
 │ > 3 waiting. Approve…     │                                                         │
 └───────────────────────────┴─────────────────────────────────────────────────────────┘
 ```
@@ -335,12 +403,12 @@ Everything sits in one tmux window, so one terminal window fills the monitor:
 
 - Each agent's pane lives in a hidden tmux window when it isn't on the wall.
 - Clicking a tile in the overview (or pressing `Enter`) moves that agent's pane onto the wall with `tmux join-pane`/`swap-pane`. If the wall is full, the slot used least recently goes back to its hidden window. The process keeps running throughout. Nothing restarts.
-- **Mouse:** `set -g mouse on`. Click a live pane to type into it. Drag a border to resize. Scroll to read history. Click an overview tile to bring that agent onto the wall.
+- **Mouse:** `set -g mouse on`. Click a live pane to type into it. Drag a border to resize. Scroll to read history. Click an overview tile to bring that agent onto the wall. Drag-select copies to the system clipboard: `fleet up` sets tmux `copy-command` to `wl-copy`, `xclip`, `xsel` or `pbcopy`, whichever the session has (ADR-28).
 - **Tiling layouts**, chosen from the overview (`1 2 4 6 9 m`), globally with `Alt+w` then the digit, or `Alt+<digit>` in terminals that don't use Alt+digit for tabs (Ptyxis and GNOME Terminal do): `1` one large pane; `2` side by side; `4` a 2×2; `6` a 3×2; `9` a 3×3; `M` main + stack (one large pane plus a column of small ones). Built from tmux's own layouts (`main-vertical`, `tiled`) plus saved custom layout strings.
 - **Pin** (`P`) keeps a pane on the wall so it is never swapped out.
 - **Zoom** (`Z`, or tmux `prefix + z`) makes one pane fill the whole wall for a moment.
 - Wall panes show a coloured border in the same colour as their tile, so status is visible in both places.
-- Named wall setups ("web work", "infra incident") save and restore which agents are on the wall and in which layout.
+- Named wall setups ("web-ui work", "gitops incident") save and restore which agents are on the wall and in which layout.
 
 **Why this is fast**
 
@@ -348,7 +416,7 @@ Everything sits in one tmux window, so one terminal window fills the monitor:
 - Status changes arrive as events from **tmux control mode** (`tmux -C`, `%output` messages per pane) instead of reading 40 panes every second. Panes are only captured when their output actually changed, and only the last lines.
 - The overview redraws only the tiles that changed. Animation runs on a 10 fps timer, and only for tiles that are spinning or pulsing.
 - Agents run on a separate tmux server (`tmux -L fleet`) so my own tmux sessions and the dev loop never get mixed up with the fleet.
-- Terminal emulator: today it's a VTE-based terminal. If drawing feels slow on the big monitor with 9 busy panes, try a GPU-accelerated terminal (kitty, WezTerm, Ghostty or foot). Nothing in the design depends on which one.
+- Terminal emulator: today it's Ptyxis (GNOME/VTE). If drawing feels slow on the big monitor with 9 busy panes, try a GPU-accelerated terminal (kitty, WezTerm, Ghostty or foot). Nothing in the design depends on which one.
 
 ---
 
@@ -375,11 +443,11 @@ Pinning (`P` in §5a) is **specified here but not built**: class 0 exists in the
 
 **Take the slot I just left.** Eviction order is the fallback, not the first rule. When the wall is full and I bring an agent on from the overview, the pane that goes is the wall pane I was **last in** — tmux `#{pane_last}` = 1 in the main window. My focus path is almost always *wall pane → overview → `Enter`*, so the slot I just left is the slot I meant to reuse, whatever its status: an explicit `Enter` is my decision and it beats class-1 protection. The incoming pane takes that slot with `swap-pane`, so it keeps the position and size I was already looking at, nothing else on the wall moves, and the layout string doesn't change. The pane that leaves goes back to a window renamed `ag-<agent>`, as with any eviction.
 
-Two exceptions fall back to the class order above: a **pinned** last-focused pane (class 0 is never replaced, even explicitly), and a last pane that isn't a wall pane at all — if I came from the supervisor, or focus never left the overview, there is no slot to reuse.
+Two exceptions fall back to the class order above: a **pinned** last-focused pane (class 0 is never replaced, even explicitly), and a last pane that isn't a wall pane at all — if I came from the admiral, or focus never left the overview, there is no slot to reuse.
 
 ### 5b.2 A grid sized to the screen, not to the preset
 
-Presets (`M-1/2/4/6/9`) stop being fixed shapes and become **caps on the number of slots**. The shape is computed from the space actually available — the wall rectangle, not the window. On the reference 300×80 terminal that rectangle is 209×64: 300×79 after the tmux status line, minus the 90-column supervisor and its border, minus the 14-row overview and its border.
+Presets (`M-1/2/4/6/9`) stop being fixed shapes and become **caps on the number of slots**. The shape is computed from the space actually available — the wall rectangle, not the window. On the reference 300×80 terminal that rectangle is 209×64: 300×79 after the tmux status line, minus the 90-column admiral and its border, minus the 14-row overview and its border.
 
 - A pane should be at least `MinPaneW`×`MinPaneH` = **64×17** cells. 16 usable rows plus the one row `pane-border-status top` takes for the title. 64 columns is what an agent TUI needs before it starts wrapping badly; demanding 80 would cap the reference wall at a 2×2 and make this rule a no-op exactly where it matters.
 - Given the wall rectangle and `n` panes, every row count `r` from 1 to `n` is tried. `cols = ceil(n/r)`, and the shape scores `min(cellW/MinPaneW, cellH/MinPaneH)` — not raw area, which ignores that cells are about twice as tall as they are wide and would put five panes in one row of 41 columns. **The score is clamped at 1**: once a cell clears the minimum, extra slack is worth nothing, so a shape that fits is never beaten by a roomier one with worse proportions (without the clamp, 3 panes would tile 1+2 instead of a single row of three). Shapes that divide evenly (`n % r == 0`) get a 10% bonus *after* the clamp, so 6 panes stay 3+3 instead of going ragged. Highest score wins; ties go to fewer rows, because height is the scarce axis.
@@ -407,63 +475,290 @@ Adaptive overview height, auto-slotting waiting agents onto the wall (§18 #13),
 
 ---
 
-## 6. The supervisor without context overload
+## 5c. Teams: group agents and act on a group
 
-The supervisor is a normal Copilot session in the bottom pane. Its `AGENTS.md` tells it how to use the `fleet` CLI and the rules below.
+A team is a named group of agents with its own colour. It lets me see which agents belong together and act on all of them at once.
+
+### Behaviour
+
+- **One team per agent.** Adding an agent that is already in a team moves it (the reply says from where). One team keeps the colour unambiguous and gives the comms access rule (below) a single answer.
+- **State on disk:** `~/.fleet/teams.json`, its own file with its own `teams.lock` (flock + atomic rename, as `board.json`). Shape: `{"teams": {"<name>": {"color": "#rrggbb", "members": ["a1","a2"], "created": "<rfc3339>"}}}`. It is a separate file, not a field in `board.json`, so an older `fleet` binary that is still running (the admiral's `fleet mcp`) cannot drop team data when it rewrites the board. It survives restarts because it is only on disk; pane tags are re-derived from it on every refresh.
+- **Names** follow agent-name rules (`[A-Za-z0-9][A-Za-z0-9_.-]{0,31}`). A team may contain names that are not on the board yet (add before spawn); members that are not running are skipped by team actions and reported.
+- **Colour:** a new team gets the first colour of a fixed palette that no other team uses (cycling when all are taken): blue, pink, teal, mauve, sky, sapphire (Catppuccin Mocha; hue changes at each step). The palette leaves out the status colours (green, yellow, peach, red, maroon, grey), the selection lavender, and rosewater/flamingo (they read as the waiting pulse on a dark background), so a team mark is never read as a status. `fleet team color <team> <colour>` takes a palette name or `#rrggbb`.
+- **Closing an agent** (`fleet close`, `fleet_close`) also removes it from its team. Deleting a team never touches its agents.
+
+### How a team shows
+
+A diamond `◆` in the team colour after the agent name (`●` is already the waiting glyph, so a dot would put two dots on a waiting agent). Status keeps owning tile borders, text colour and the pane border colour, so nothing else changes colour. Agents without a team look exactly as before.
+
+- Overview tile: `⠋ name ◆ ▣` on the first line (the name is truncated, never the marks); the team name, cut to 10 cells, starts the second line (`alpha · copilot · working 3m`). Chips: `⠋ name ◆`.
+- Wall pane border: `⠋ name ◆ working`, no team name (narrow panes cut the border from the right, and the status matters more). The format reads pane options `@fleet_team` and `@fleet_team_color`, which refresh keeps in sync with `teams.json` (set only when they differ, unset when the agent leaves).
+- `fleet ls`: a `TEAM` column (`◆ alpha`, dot coloured on a terminal) appears only when at least one agent has a team. `fleet ls --json` adds `team` and `team_color` to each agent that has one.
+- `fleet_status`: a `team` column after `name` (empty for agents without a team).
+
+### Surface
+
+| CLI | MCP (`fleet_team`, `action` =) | What it does |
+|---|---|---|
+| `fleet team ls [--json]` | `list` | Teams with colour and members (running members marked) |
+| `fleet team create <team> [colour]` | `create` (`team`, opt. `color`) | New empty team; auto colour unless given |
+| `fleet team delete <team>` | `delete` | Remove the team and its memberships; agents keep running |
+| `fleet team add <team> <agent>...` | `add` (`team`, `agents`) | Add agents (moves them from another team). Creates the team if it does not exist |
+| `fleet team rm <team> <agent>...` | `remove` | Take agents out of the team |
+| `fleet team color <team> <colour>` | `color` | Change the colour |
+| `fleet team send <team> "text"` | `send` (`text`) | Paste into every running member; reports per member |
+| `fleet team show <team>` / `hide <team>` | `show` / `hide` | Put running members on the wall / take them off. Show stops at the wall's limit and says which members did not fit |
+| `fleet team close <team> [--yes]` | `close` (`confirmed`) | Close every member. CLI asks `y/N` unless `--yes`; MCP needs `confirmed=true` after the user said yes. The team itself stays (empty) |
+
+No new key bindings (the hint bar is full).
+
+### Teams and agent comms
+
+The inter-agent protocol (§6.6, ADR-19) gives agents access to each other through pairwise grants. Teams plug into it as an **implicit two-way grant** (built, ADR-34): under the default `agent_mail = "team"`, two agents in the same team may message each other without a request, and agents in different teams must ask. The team package exposes `team.Store.SameTeam(a, b string) bool` and `Teammates(name) []string` for that access check; teams store no grants and comms stores no teams. Team membership is changed only by the user (CLI) and the admiral (`fleet_team`), never by the agent-scoped MCP server, so an agent cannot join a team to gain access.
+
+### Out of scope
+
+Multiple teams per agent, nested teams, team-level wall layouts, keys for teams, spawning straight into a team, and the comms protocol itself.
+
+---
+
+## 5d. What's new in fleet (built)
+
+One list of fleet's own user-facing features, newest first, so I can see what the fleet can do now. It is the same wherever it is opened: it never reads the repo of the pane, the cwd or the agents' dirs. (The first version showed the git history of the pane's repo; that was not what I wanted, ADR-30.)
+
+### Behaviour
+
+- **Source:** `CHANGELOG.md` at the repo root, one line per user-facing change under a `## YYYY-MM-DD` heading, newest day first and newest line first within a day. A line may end with refs in brackets: short commit hashes and `ADR-n`, e.g. `(66a2ece, ADR-27)`. The file is built into the binary with `go:embed`, so an installed `fleet` always knows its own features.
+- **Fallback:** when fleet can find its own source repo (the binary's resolved path is `<repo>/bin/fleet` and `<repo>/go.mod` names the fleet module), it adds commits on that repo's local `main` whose subject starts with `feat` (`feat:`, `feat(x):`, `feat!:`) and that the changelog does not cover: not cited by hash, not touching `CHANGELOG.md`, and not older than the newest changelog day. They show dimmed, with the hash, after the curated lines of the same day. Read-only git with `GIT_OPTIONAL_LOCKS=0`; no repo, no git or an error means no fallback, silently (logged).
+- **Version:** the first line is `fleet <commit> · built <YYYY-MM-DD HH:MM> · N new` in Overlay1, from the Go build info (`vcs.revision`, `vcs.time`; `+dirty` when `vcs.modified`), or `fleet (unknown build)`. `· N new` is left out when nothing is new.
+- **New:** an entry is new when its id is not in `~/.fleet/whatsnew-seen` (one id per line). The id is the first cited hash, else a hash of date and text, so editing a line's text marks it new again. Opening the popup shows the new marks, then records every listed id; the next opening shows none until an entry is added. On first use every entry is new. The CLI prints the marks but never records them.
+- **Rows:** date (`YYYY-MM-DD`, Overlay1, on the first row of each day only; one blank line between days), a `✦` in Text bold for new (not Peach `●`, which means waiting on the wall), then the text wrapped at most 100 cells wide, continuation lines indented under it. Markdown backticks are stripped and code spans drawn in bold Text. Refs follow in Overlay0 as one unbreakable `(…)` token, on their own continuation line when they don't fit. Fallback rows draw their subject in Overlay1. No selection: the view scrolls by line, and a dim `↓ more` on the bottom line says there is more.
+- **States:** an empty changelog with no fallback shows `no entries`.
+
+### Surface
+
+- `Alt-g` anywhere in the fleet server, `g` in the overview, or a click on `Alt-g what's new` in the tmux status line opens the popup (`fleet changes --popup`, 90%×85%, titled ` what's new in fleet · q closes `). All three use one tmux command. In the popup: `↑↓`/`jk`, `PgUp`/`PgDn`, `Home`/`End` and the wheel scroll; `q`/`Esc`/`g`/`Alt-g` close it.
+- `Alt-g what's new` is the last tmux hint before `Alt-? all keys`, so it is the first dropped on a narrow status line. It is a `#[range=user|changes]` range; a `MouseDown1Status` binding opens the popup on that range and runs tmux's default (`switch-client -t =`) anywhere else.
+- `fleet changes [--json]` prints the same list in a terminal: the version line, then one line per entry (`date  ✦  text  (refs)`, backticks stripped).
+- Keeping it current is part of done: a user-facing feature or fix adds its changelog line in the same commit (worker playbook, `.fleet/worker.md`, AGENTS.md).
+
+### Out of scope
+
+Reviewing the agents' commits and diffs (use git or the agent's pane), release tags and version numbers, an MCP tool, filtering and search.
+
+---
+
+## 6. The admiral without context overload
+
+The admiral is a normal Copilot session in the bottom pane. Its `AGENTS.md` tells it how to use the `fleet` CLI and the rules below.
 
 ### 6.1 State on disk
 
-The supervisor reads `board.json`, agent cards and `decisions.log`. Anything it learns that matters goes into a card or the log before it moves on. Its conversation is a scratchpad.
+The admiral reads `board.json`, agent cards and `decisions.log`. Anything it learns that matters goes into a card or the log before it moves on. Its conversation is a scratchpad.
 
 ### 6.2 Summaries, not raw panes
 
-`fleet peek` runs the pane through a cheap model (Haiku, or local Ollama for anything sensitive). It returns roughly: status, what the agent is doing, what it needs, in about 5 lines. The supervisor is not allowed `--raw`. If the pane hash hasn't changed, the cached summary is reused, so polling stays cheap.
+`fleet peek` runs the pane through a cheap model (Haiku, or local Ollama for anything sensitive). It returns roughly: status, what the agent is doing, what it needs, in about 5 lines. The admiral is not allowed `--raw`. If the pane hash hasn't changed, the cached summary is reused, so polling stays cheap.
 
 ### 6.3 One-key reset (`R`)
 
-Kill the supervisor process and start a fresh one with a boot prompt:
+Kill the admiral process and start a fresh one with a boot prompt:
 "Read `~/.fleet/board.json` and the last 50 lines of `decisions.log`. Report what needs me, then wait." This loses nothing because state lives on disk.
 
-Automatic version: when the supervisor's context goes red, it writes anything pending to the board and resets itself. Built as described in §6.5.
+Automatic version: when the admiral's context goes red, it writes anything pending to the board and resets itself. Built as described in §6.5.
 
 ### 6.4 Focus sessions (`f`)
 
-For a hard problem in one agent, open a short-lived supervisor that loads only that agent's card and raw pane. It can go deep, then updates the card and exits. The main supervisor only sees the updated card.
+For a hard problem in one agent, open a short-lived admiral that loads only that agent's card and raw pane. It can go deep, then updates the card and exits. The main admiral only sees the updated card.
 
-### 6.5 Supervisor memory: notes, handoff, context meter (R11, §18 #14)
+### 6.5 Admiral memory: notes, handoff, context meter (R11, §18 #14)
 
-The supervisor's chat fills up over a long day. Fleet does not compact it (ADR-4). The supervisor saves what it must not forget to disk as it goes. When its context gets full it writes a handoff and fleet replaces it with a fresh session that starts from the handoff and the board. Agents aren't affected: they live on the board and in tmux, not in the supervisor's chat.
+The admiral's chat fills up over a long day. Fleet does not compact it (ADR-4). The admiral saves what it must not forget to disk as it goes. When its context gets full it writes a handoff and fleet replaces it with a fresh session that starts from the handoff and the board. Agents aren't affected: they live on the board and in tmux, not in the admiral's chat.
 
 **On disk** (`~/.fleet/`)
 
 | Path | What |
 |---|---|
-| `decisions.log` | Append-only notes, one line each: `2026-11-04T21:40 [agent] text`. Decisions, user preferences, promises ("tell me when bs-nav is done"). |
-| `supervisor/session.json` | Current supervisor: `session_id`, `profile`, `pane_id`, `started`, `generation`, `previous` (last session ID). |
-| `supervisor/handoff.md` | Latest handoff written by the outgoing supervisor (max 4 KB is shown to the next one). Earlier ones are moved to `supervisor/handoffs/<timestamp>.md`; the last 20 are kept. |
+| `decisions.log` | Append-only notes, one line each: `2026-11-04T21:40 [agent] text`. Decisions, user preferences, promises ("tell me when web-nav is done"). |
+| `admiral/session.json` | Current admiral: `session_id`, `profile`, `pane_id`, `started`, `generation`, `previous` (last session ID). |
+| `admiral/handoff.md` | Latest handoff written by the outgoing admiral (max 4 KB is shown to the next one). Earlier ones are moved to `admiral/handoffs/<timestamp>.md`; the last 20 are kept. |
 
-**Context meter.** For a Copilot supervisor, fill = `inputTokens / maxPromptTokens` of the last `session.usage_record` in `~/.copilot/session-state/<session_id>/events.jsonl`. Only the end of the file is read. The session ID comes from `session.json`, or from `--session-id <uuid>` in the supervisor pane's start command if the file is missing (supervisors started before this feature). No ID, a non-Copilot supervisor or no usage yet means the fill is unknown, and nothing is shown or warned.
+**Context meter.** For a Copilot admiral, fill = `inputTokens / maxPromptTokens` of the last `session.usage_record` in `~/.copilot/session-state/<session_id>/events.jsonl`. Only the end of the file is read. The session ID comes from `session.json`, or from `--session-id <uuid>` in the admiral pane's start command if the file is missing (admirals started before this feature). No ID, a non-Copilot admiral or no usage yet means the fill is unknown, and nothing is shown or warned.
 
-- Supervisor pane border: `supervisor · ctx 34%`, green < 40%, yellow 40–69%, red ≥ 70% (the handoff threshold; same bands as §5). The overview's refresh loop sets the `@fleet_ctx` pane option when the value changes.
-- `fleet supervisor` prints one line: short session ID, fill (`ctx 34% (68k/200k)`), generation, uptime. `--json` gives the same fields.
+- Admiral pane border: `admiral · ctx 34%`, green < 40%, yellow 40–69%, red ≥ 70% (the handoff threshold; same bands as §5). The overview's refresh loop sets the `@fleet_ctx` pane option when the value changes.
+- `fleet admiral` prints one line: short session ID, fill (`ctx 34% (68k/200k)`), generation, uptime. `--json` gives the same fields.
 
-**MCP tools** (supervisor)
+**MCP tools** (admiral)
 
 - `fleet_note(text, agent?)` appends a line to `decisions.log`.
-- `fleet_brief()` returns: the handoff (if any, with its time), the last 30 lines of `decisions.log`, then the same table as `fleet_status`. A fresh supervisor calls this first.
-- `fleet_handoff(summary)` writes `supervisor/handoff.md` (rotating the old one) and asks tmux to run `fleet supervisor reset --handoff` in the background after about 2 seconds. It returns at once, because the reset kills the supervisor and the MCP server with it. The summary covers things the board doesn't hold: open questions to the user, what it promised to watch, plans in flight. It doesn't restate agent statuses.
-- When the fill is at or above the threshold (default 70, env `FLEET_SUP_HANDOFF_PCT`), every fleet tool result ends with one line: `[supervisor context 74%: save anything pending with fleet_note, then call fleet_handoff]`.
+- `fleet_brief()` returns: the handoff (if any, with its time), the last 30 lines of `decisions.log`, then the same table as `fleet_status`. A fresh admiral calls this first.
+- `fleet_handoff(summary)` writes `admiral/handoff.md` (rotating the old one) and asks tmux to run `fleet admiral reset --handoff` in the background after about 2 seconds. It returns at once, because the reset kills the admiral and the MCP server with it. The summary covers things the board doesn't hold: open questions to the user, what it promised to watch, plans in flight. It doesn't restate agent statuses.
+- When the fill is at or above the threshold (default 70, env `FLEET_ADMIRAL_HANDOFF_PCT`; the deprecated `FLEET_SUP_HANDOFF_PCT` is read when it is unset), every fleet tool result ends with one line: `[admiral context 74%: save anything pending with fleet_note, then call fleet_handoff]`.
 
-**Reset** (`fleet supervisor reset [--handoff]`, tmux `M-R`, overview `R`)
+**Reset** (`fleet admiral reset [--handoff]`, tmux `M-R`, overview `R`)
 
-1. Find the `@role=sup` pane in `fleet:main`. If there is none, fail with "no supervisor pane; run fleet up".
-2. If no handoff is newer than the current session's start (a manual reset), write a stub handoff: "Manual reset at <time>; previous supervisor wrote no handoff. Previous session: <id>."
-3. Build the same command as `fleet up` with a new session ID, plus for Copilot `-i "<boot prompt>"`. Boot prompt: "You are taking over as fleet supervisor. Call fleet_brief, tell the user in 1–3 lines what needs them, then wait."
-4. `respawn-pane -k` the supervisor pane with that command, then update `session.json` (generation + 1, `previous` = old ID). The old Copilot session isn't deleted; its ID is in the handoff, so `copilot --resume <id>` still opens it.
+1. Find the `@role=sup` pane in `fleet:main`. If there is none, fail with "no admiral pane; run fleet up".
+2. If no handoff is newer than the current session's start (a manual reset), write a stub handoff: "Manual reset at <time>; previous admiral wrote no handoff. Previous session: <id>."
+3. Build the same command as `fleet up` with a new session ID, plus for Copilot `-i "<boot prompt>"`. Boot prompt: "You are taking over as fleet admiral. Call fleet_brief, tell the user in 1–3 lines what needs them, then wait."
+4. `respawn-pane -k` the admiral pane with that command, then update `session.json` (generation + 1, `previous` = old ID). The old Copilot session isn't deleted; its ID is in the handoff, so `copilot --resume <id>` still opens it.
 
-`M-R` and overview `R` go through tmux `confirm-before` ("reset supervisor? (y/n)"), because a reset by mistake loses the chat. `--handoff` (called from `fleet_handoff`) doesn't ask.
+`M-R` and overview `R` go through tmux `confirm-before` ("reset admiral? (y/n)"), because a reset by mistake loses the chat. `--handoff` (called from `fleet_handoff`) doesn't ask.
 
-**Out of scope:** Copilot `/compact` or any in-place summarising; context meters for non-Copilot supervisors; deleting old supervisor sessions; agent cards (`agents/<name>.md`); focus sessions (§6.4).
+**Out of scope:** Copilot `/compact` or any in-place summarising; context meters for non-Copilot admirals; deleting old admiral sessions; agent cards (`agents/<name>.md`); focus sessions (§6.4).
+
+
+### 6.6 Agents talking to each other: free within a team, on request across (ADR-19, ADR-34)
+
+**Built 2026-11-04.** Code in `internal/mail` (store), `internal/fleet/mail.go` (identity, nudge), `internal/mcp/agent.go` (agent mode), `cmd/fleet/mail.go` (CLI).
+
+Agents can message each other without the admiral. Teammates, and agents in one repo that have no team, may do so freely; every other pair needs a grant first (ADR-34).
+
+**Store.** `~/.fleet/mail/`, guarded by one `flock` (`mail.lock`), every rewrite atomic (temp + rename), like `board.json`. Survives restarts; needs no admiral, overview or MCP process running.
+
+| Path | What |
+|---|---|
+| `mail/grants.json` | One entry per unordered pair: `a`, `b`, `state` (`pending`, `granted`, `denied`), `requested_by`, `reason`, `decided_by` (agent name or `user`), times |
+| `mail/<agent>/inbox.jsonl` | Append-only messages to that agent: `id`, `from`, `to` (`*` for broadcast), `kind` (`msg`, `request`, `grant`, `deny`, `revoke`), `text`, `t` |
+| `mail/<agent>/read` | ID of the last message the agent has read |
+
+**Policy (ADR-34).** `[defaults] agent_mail` in `config.toml` (fleet-wide) decides which pairs have *implicit* access, needing no request:
+- `"team"` (default): agents in the same team (§5c); and agents in the same repo, or in worktrees of it (same `git rev-parse --git-common-dir` of their board dirs), when neither has a team. A team member and a teamless agent, or members of two teams, ask.
+- `"open"`: every pair on the board.
+- `"ask"`: none; every pair asks (the behaviour before ADR-34).
+
+An explicit pair always wins: `granted` allows, `denied` blocks. Revoking a pair that has implicit access stores it as `denied` (decided by the revoker), so the revoke sticks; a new request and grant reopens it. `fleet_agents` / `fleet mail agents` show implicit access as `free (team)`, `free (repo)` or `free (open)`. A request for a pair that is already free returns `granted` without notifying anyone. An unknown value fails config loading like any other bad key (fleet then logs it and runs with the default). The setting is reread on every access check, so running agents see a change at once.
+
+**Access.** A grant is two-way: once A and B are `granted`, either can message the other.
+- *Request*: A asks for access to B with a reason. The pair becomes `pending`, and B receives a `request` message. If B already has a pending request towards A, the new request grants the pair.
+- *Grant / deny*: only the target (B) or the user can decide. The user decides with `fleet access grant|deny A B`, or through the admiral (`fleet_access_decide`, which requires `confirmed=true` after an explicit yes). The requester can never grant itself. A denied pair can be asked again.
+- *Revoke*: either side of the pair, or the user, at any time; for implicit access it leaves a `denied` pair (see Policy). `fleet close` drops every pair of the closed agent and keeps its mailbox.
+- Both agents must be on the board when access is requested.
+
+**Messages.** Text capped at 8 KB. `to="*"` broadcasts to every agent the sender may message (granted or implicit), not every agent. Sending without access fails with "no access to B: request it with fleet_access_request". Every message is logged (slog, component `mail`) and stays in the recipient's inbox; the admiral reads the traffic with `fleet_access limit=N` and the user with `fleet access log [-n N]` (last N messages across all inboxes, a broadcast once). The recipient's tools show messages as untrusted text from another agent: an agent reads them as information, never as orders from the user.
+
+**Identity.** The caller is resolved from the tmux pane it runs in: `$TMUX_PANE` and that pane's `@fleet_agent` tag on the `fleet` socket. `fleet mcp --agent NAME` and `fleet mail --as NAME` override it only outside an agent pane, or when they name the pane's own agent. `fleet access grant|deny|revoke` refuses to run inside an agent pane. `user` is a reserved agent name. With neither, agent tools refuse ("not a fleet agent"). This controls cooperation, not security: any agent with a shell can edit `~/.fleet`.
+
+**Surfaces.**
+- MCP, agent mode: `fleet mcp --agent NAME` (or run inside an agent pane) exposes only `fleet_agents` (name, profile, status, dir, access state with me), `fleet_access_request`, `fleet_access_respond` (grant/deny a request to me), `fleet_access_revoke`, `fleet_msg_send` (`to` = name or `*`) and `fleet_inbox` (unread by default and marks them read; `all=true` shows the last N without marking anything read). Every agent-mode result ends with "(N unread)" when N > 0.
+- MCP, admiral: `fleet_access` shows the policy, then pairs and pending requests (`limit=N` adds the last N messages); `fleet_access_decide` grants, denies or revokes any pair (`confirmed=true`).
+- CLI, for agents without MCP (agy, vibe, already-running agents): `fleet mail agents | inbox [--all] [-n N] | send <to|*> "text" | request <to> ["reason"] | grant <who> | deny <who> | revoke <who>` with `--as NAME`. For the user: `fleet access [ls] | log [-n N] | grant A B | deny A B | revoke A B`.
+
+**Wiring.** Profiles get a data field `peer_args`, inserted straight after the command, with `{peer_mcp}` expanded to a one-server JSON config (`fleet-peer` → `{fleet} mcp --agent {name}`). Copilot profiles use `--additional-mcp-config {peer_mcp}`; Claude profiles use `--mcp-config {peer_mcp_claude}` (Claude's server schema has no `tools` key). Spawn and adopt both add it. agy, vibe and fake have none and use the CLI. Agents that are already running keep their tools until they are respawned. They can use `fleet mail` in the meantime.
+
+**Nudge.** After a message or request is written, the sender's process types one line into the recipient's pane, but only when its board status is `idle`, never `waiting`, `working` or anything else: `[fleet] 1 new message from A. Read it with fleet_inbox (or: fleet mail inbox)`. A recipient is nudged once per unread batch. If it isn't idle, it sees the unread count on its next fleet tool call.
+
+**Teams.** Same-team membership is an implicit two-way grant (see Policy). `mail.Store` has an `Implicit(a, b)` hook and knows nothing about teams; `internal/fleet/mail.go` fills it from the policy, `team.Store` and the board.
+
+**Out of scope:** threads and replies-to, attachments, cross-machine mail, message expiry, read receipts, structured task handoff (that stays with task cards, §18 #5–7), approval through the TUI.
+
+
+### 6.7 Agents report back to the admiral (ADR-20)
+
+**Built 2026-11-04.** Code in `internal/mail/report.go`, `internal/fleet/report.go` (wake, auto-close), `internal/mcp/reports.go`, tile line in `internal/ui/view.go`.
+
+An agent tells the admiral it is done, blocked, has a question, or has made progress. It does this with a tool call instead of printing a marker such as `FLEET-DONE:` and hoping someone reads the screen.
+
+**Surface.**
+- Agent MCP (agent mode, §6.6): `fleet_report(state, summary)`. `state` is `done`, `blocked`, `question` or `progress`. `summary` starts with a one-line headline and may carry detail on later lines. The full text is stored (control characters dropped, at most 8000 characters) and is what `fleet_reports` returns, also after the agent is closed or auto-closed. The board, the tile, the `report` column and the wake line use the headline: newlines folded, at most 200 characters (100 in the wake line).
+- CLI for agents without MCP: `fleet report [--as NAME] <state> "summary"`. Identity rules are the same as `fleet mail`.
+- Admiral MCP: `fleet_reports` returns unread reports, oldest first, and marks them read. `all=true` returns the last N without marking anything read. `fleet_status` gains a `report` column with the latest state and summary, and `fleet_brief` lists unread reports. Every admiral tool result ends with "(N unread reports)" when N > 0.
+
+**Storage.** Reuses the mailbox (§6.6). The admiral is a well-known recipient called `admiral`, a reserved agent name like `user` (the old name `supervisor` is reserved too and maps to the same box). Each report is a message of kind `report` in `mail/admiral/inbox.jsonl` (`mail/supervisor` is a symlink to it), with the state at the start of its text. No grant is needed to report. The latest report is also stored on the board entry (`report: {state, summary, at}`), so it survives restarts and the card can show it.
+
+**Card.** While an agent is not `working`, line 3 of its tile shows the latest report (`✓ done: …`, `✗ blocked: …`, `? question: …`, `… progress: …`) instead of the last screen line, coloured green, red, yellow or dim. While the agent is working, the tile shows the screen line as before. A new report replaces the old one.
+
+**Wake the admiral.** For `done`, `blocked` and `question` (never `progress`), the reporting process types one line into the admiral pane (`fleet:main`, `@role sup`): `[fleet] report from A: done: <headline>. Full text: call fleet_reports.` It does this only when the admiral pane looks idle by its profile's status patterns, and only once per unread batch, the same rule as the §6.6 nudge. When the admiral is mid-turn (or has no pane), the line is queued in `mail/admiral/wake-pending` (the latest line wins) and the overview TUI's poll types it as soon as the admiral pane looks idle (ADR-29). The queued line is dropped, not typed, once the admiral has read its reports or was already woken for this unread batch. The report always waits on disk, and the admiral also sees the unread count on its next tool call.
+
+**Auto-close (opt-in).** Local preference `auto_close_done` (`[defaults]` or `[profile.x]` in `config.toml`, default `false`). When it is true and an agent reports `done`, fleet closes the agent unless the agent itself left work behind (ADR-29):
+- A dir that git says is not a work tree, or that no longer exists, closes (a read-only review in a plain folder has nothing to lose). A git error or timeout (3 s) blocks ("git state unreadable").
+- At spawn (and queue drain, not adopt) fleet records a baseline on the board entry (`baseline: {head, dirty, worktrees}`): `HEAD`, every path in `git status --porcelain --untracked-files=all` with a fingerprint of its content (FNV-64; size and mtime for non-regular or >64 MB files), and `git worktree list`. Over 2000 dirty paths records no baseline.
+- With a baseline, the close is refused only for the agent's own work: a path that is dirty now and was clean, or whose fingerprint changed, since spawn ("uncommitted changes by the agent: a, b (+N more)"); a linked worktree that did not exist at spawn, is named after the agent (the playbook's `../<repo>.wt/<name>`) and is dirty or unmerged ("worktree left behind (uncommitted changes): <path>"; other new worktrees belong to sibling agents and are ignored); or a `HEAD` that moved and is not an ancestor of the local `main`/`master` ("not merged into main"). Dirt that predates the agent and an unchanged `HEAD` (even on an unmerged branch) don't block.
+- Without a baseline (adopted agents, agents spawned by an older fleet) the strict rule stands: a clean `git status --porcelain` and `HEAD` an ancestor of `main` (or `master`).
+
+A refusal keeps the report and appends the reason to the admiral line ("not auto-closed: uncommitted changes by the agent: g"). The close runs through `tmux run-shell -b` after 2 s, so the agent's own MCP call returns first. It never removes the worktree or the branch.
+
+*Idle sweep.* `auto_close_idle` (a duration such as `"15m"`, default off, needs `auto_close_done`): the overview TUI's poll closes an agent whose latest report is `done`, that has been idle at least that long, and whose idle spell began within 5 minutes of the report (one that went back to work after reporting is left alone), once the same check passes. Each agent's git state is checked at most once a minute, in the background. This catches a branch the admiral merged after the report, and a close that failed at report time.
+
+*Dead panes (ADR-33).* Agent panes keep `remain-on-exit on`, so an agent whose process ends (the user typed `/exit`, or it crashed) stays on the board as `error / process exited` until it is closed. The overview TUI's poll (the same one that drains the queue and runs the idle sweep) handles such panes. It reads the exit from tmux, not from the screen: `#{pane_dead_status}` (exit code) and `#{pane_dead_signal}` (signal number) in the pane listing. The tool runs as `bash -lc 'exec …'`, so the code is the tool's own.
+- Clean exit (status 0, no signal): close the agent right away, as `fleet close` does (board, overview and wall). The admiral gets a `done` report "exited, closed" and the wake line `[fleet] <name> exited, closed.`, no question.
+- Crash (non-zero status, a signal, or tmux too old to say): the agent stays `error`. The admiral gets a `blocked` report with the exit code or signal and the last few screen lines, and the wake line `[fleet] <name> crashed (exit 3): <last line>. Closing in 5m. Full text: call fleet_reports.` The agent is closed once it has been dead for `dead_pane_grace` (local preference in `[defaults]` or `[profile.x]`, a duration, default `"5m"`; `"0"` closes at once, `"off"` never closes a crashed pane). Clean exits always close.
+- Work is never lost silently: before the report fleet runs the auto-close check (`AgentBlocker`, ADR-29). The dead pane is still closed, but a refusal reason is added to the report and the wake line ("left work behind: uncommitted changes by the agent: a; the session is kept, `fleet adopt` can resume it"). Closing never removes the dir, worktree, branch or the tool's session.
+- The first sighting is recorded on the board entry (`exit: {code, signal, at}`) before anything is sent, so each dead pane is reported once, also across overview restarts and with several overviews. A close that failed is retried at most once a minute. Without a running overview nothing happens; the pane waits as before.
+
+**Out of scope:** structured payloads (files, links), reports from the admiral to the user, desktop notifications (§18 #13), removing worktrees, panes without `remain-on-exit` (adopted panes that vanish become `gone`), restarting crashed agents.
+
+### 6.8 Admiral tool ergonomics (ADR-24)
+
+**Built 2026-11-05.** Code in `internal/status/{menu,screen}.go`, `internal/fleet/{answer,info}.go`, `Fleet.Send`, `internal/mcp/send.go`.
+
+The admiral's tools answer real Copilot/Claude pickers, cost fewer tokens and need fewer peeks.
+
+**Behaviour.**
+- *Numbered prompts.* `status.Set.Menu` reads the bottom 14 lines for a run of options `1.`, `2.`, … with a `❯`/`>` cursor on one, skipping transcript lines (so a numbered list in the agent's reply is no prompt). It returns the options ("N. label", label at most 60 runes), the selected one and the question (closest line above ending in "?"). `fleet_status` appends them to a waiting agent's `waiting_for`: `Do you want to allow this? [1 Yes | 2 Yes, and add these directorie… | 3 No, …]` (at most 200 runes; only waiting agents' panes are captured).
+- *Answering.* `fleet_answer` takes `answer` (y/n) or `option` (1–9), exactly one, and still needs `confirmed=true` (ADR-9). With a menu on screen fleet re-captures the pane, moves the cursor with Up/Down from the `❯` item to the target and presses Enter; `y` = option 1, `n` = the first option starting with "No". Menu gone at that point: "prompt no longer on screen". No menu: y/n is typed as before; `option` errors. Optional `expect` (the question the user confirmed): a case-insensitive substring of the question or of the target option's label; no match → "prompt changed: now '<question>'" and nothing is pressed. The reply names the option chosen and the question.
+- *Keys.* `fleet_send` takes `keys` from an allowlist (Enter, Escape, Up, Down, Left, Right, Tab, BTab, Space, BSpace, 1–9, y, n). `text`+`keys` pastes without Enter, then presses the keys.
+- *Confirmation gate.* Any `fleet_send` (text or keys, every target) and `fleet_team send` to an agent that is on a prompt (a waiting pattern or a numbered menu in a fresh capture) needs `confirmed=true`, since its Enter would answer the prompt; without it that agent is refused/skipped with "agent is waiting on a prompt …". An unsubmitted paste alone is not a prompt, so `keys=["Enter"]` submits it without confirmation.
+- *Safer submit.* `Fleet.Send` pastes, waits 150 ms, presses Enter, then watches the pane for up to 2 s for the `pending` pattern (§4). Still there: one more Enter (only if no prompt has come up meanwhile), then an error "pasted but not submitted; try fleet_send keys=[Enter]". `fleet_team send` uses the same path. Tools without `pending` skip the watch.
+- *Several targets.* `fleet_send` takes exactly one of `name`, `names` or `team`. Several targets are sent one by one; the reply has one line per agent (`a1: sent`, `a2: skipped (…)`); the confirmation gate applies per agent.
+- *Peek.* Cleaned by default: lines of only box/block characters dropped, `│┃║` borders and the scrollbar stripped, trailing spaces trimmed, blank runs collapsed; `lines` counts cleaned lines. `raw=true` gives the old output. `last_message=true` returns the agent's last main-agent reply from its session log (profile `subagent_log`; Copilot `assistant.message` without `agentId`/`parentToolCallId`, non-empty), reading only the last 1 MB, at most 4000 runes (the end).
+- *`fleet_info(name)`.* `key: value` lines: profile, team, status and its age, last activity, dir, git worktree/branch/dirty files/merged into main (or master)/commits ahead (each git call times out after 3 s; `git: not a git work tree` otherwise), session id, context % (Copilot profiles), mode from the footer (`Autopilot · Allow All`, `Interactive · Manual Approval`).
+- *Close note.* `fleet_close` names uncommitted or unmerged work in the agent's dir (the auto-close check, §6.7) in its refusal and in its result. It never blocks the close.
+
+**Out of scope:** auto-answering prompts (ADR-9), report-back and wake-up (§6.7), spawning worktrees, forcing autopilot, hot reload of the MCP server (§6.9), RAM/CPU figures, CLI flags for any of this.
+
+### 6.9 Hot reload of the MCP server (ADR-25)
+
+**Built 2026-11-05.** Code in `internal/mcp/reload.go`, the read loop in `internal/mcp/server.go`, `--probe` in `cmd/fleet/mail.go`.
+
+**Problem.** The admiral CLI starts `fleet mcp` (stdio) once. `make build` puts a new `bin/fleet` in place (new inode), but the running MCP process keeps the old code. On 2026-11-05 an admiral's MCP process ran a deleted binary long after a status fix; its old classifier and the TUI's new one both wrote the board, so agents flipped between waiting and working on every admiral call. Until now the only fix was a handoff, which loses the chat.
+
+**Behaviour.** Every `fleet mcp`, admiral or `--agent`, re-execs itself in place:
+- At start the server records the identity of the running binary (`/proc/self/exe`, falling back to the path) and watches the path (`Fleet.Exe`, symlinks resolved).
+- Before handling each request line it stats the file once. The file has changed when it is a different file (inode) or its modtime or size differ.
+- On a change it first runs `<exe> mcp --probe` with a 5 s timeout. The probe starts like a normal `fleet mcp`, checks the tool definitions are not empty, prints `ok` and exits 0. If the probe fails (half-written file, crash, an older binary without `--probe`), the server logs a warning and handles the request with the old code. It doesn't probe the same file identity again for 10 s.
+- If the probe passes, the server writes the current request line and any bytes already read ahead from stdin to a 0600 file under `<home>/run/` (after an earlier reload, also the part of that reload's pending input not read yet). It stats the path again, and if the file changed after the probe it drops the pending file and tries on the next request. Then it `syscall.Exec`s the same path with the same argv and `FLEET_MCP_PENDING=<file>`, `FLEET_MCP_RELOADED=1`. The pid and the stdio pipes stay the same, so the client sees no disconnect. If the exec fails, the server deletes the file and handles the request with the old code (same 10 s back-off).
+- The new process clears both variables so children don't inherit them, writes `notifications/tools/list_changed`, reads and deletes the pending file, then serves those bytes before stdin. It doesn't need a new `initialize`, because the server keeps no handshake state. The first tool result after a reload ends with `[fleet updated: tools reloaded]`.
+- `initialize` advertises `capabilities.tools.listChanged = true`. Copilot CLI refetches the tool list on the notification (auto-refresh, 300 ms debounce), and Claude Code supports it too.
+
+**What reloads:** tool code and the tool list. State is all on disk (board, mail, notes), and the in-memory `Server` holds only the agent name, a lock and closures that `New` rebuilds, so nothing is lost.
+**What doesn't:** the MCP instructions text (clients read it only at `initialize`) and the admiral's own chat and model. Those need the CLI restarted with `--resume <session id>` (manual fallback) or a handoff (last resort).
+
+**Out of scope:** a `fleet_reload` tool (reload happens on the next call anyway), automatic `--resume` restarts, reloading the TUI.
+
+### 6.10 Choosing and swapping the admiral's profile (ADR-27)
+
+**Built 2026-11-05.** Code in `cmd/fleet/admiral_profile.go` (resolution, swap, restart, rollback), `cmd/fleet/admiral_picker.go` (Alt-P popup), `internal/supervisor/profile.go` (last choice), `internal/mcp/admiral.go` (`fleet_admiral_profile`).
+
+The admiral (the supervisor before ADR-26; `supervisor` names keep working) runs under one tool profile from `fleet profiles`: `copilot`, `claude-copilot`, `claude-personal` and so on. This section lets the user pick that profile at start and swap it while fleet runs. It only changes the admiral; agents keep the profile they were spawned with (§4).
+
+**Choosing at start.** `fleet up` picks the admiral profile in this order, first match wins:
+1. `--admiral-profile NAME` on `fleet up`, or before any command (`fleet --admiral-profile NAME` alone means `fleet up`). `--supervisor-profile` is a deprecated alias (one line on stderr). An unknown name is an error, and nothing starts.
+2. `FLEET_ADMIRAL_PROFILE`, then `FLEET_SUPERVISOR_PROFILE`.
+3. The last choice, `<home>/admiral/profile` (one line).
+4. `[admiral] profile = "NAME"` in the local `config.toml`.
+5. `copilot`.
+A name from 2–4 that is no longer a profile is skipped with a warning in the log and on the tmux status line, and the next source is tried. If the admiral is already running under another profile, `fleet up --admiral-profile NAME` swaps it (below) and then attaches.
+
+**Swapping live** (`fleet admiral profile NAME`; `fleet supervisor profile` is the same handler)
+- `fleet admiral profile` with no name prints the active profile and the list, the active one marked.
+- tmux `Alt-P` and overview `P` open a picker popup (`display-popup`) listing the profiles, the active one marked; arrows or `j`/`k` and ⏎ pick, a digit picks directly, `Esc`/`q` cancels. The picker exits at once and the swap runs in the background (`tmux run-shell -b`); the result shows on the status line.
+- MCP `fleet_admiral_profile(profile, summary?)` (admiral only). It checks the name, writes `summary` as the handoff when given, schedules `fleet admiral profile NAME` through `tmux run-shell -b` after about 2 seconds and returns at once ("switching to NAME in a few seconds. Stop here."), because the swap replaces the pane its own MCP server runs in.
+- `fleet admiral restart` restarts the admiral under its current profile and resumes the same session. It is also what `fleet admiral profile <current>` does.
+
+**Context carries over.** A different profile is a different CLI or account, so the chat cannot move.
+- *Same profile* (restart): `respawn-pane -k` with the profile's `resume` args and the same session ID, no boot prompt. Same generation, same `session.json` except `pane_id`. The chat survives; the MCP instructions text and the model are reloaded (the manual fallback named in §6.9). A profile without `resume` args, or no known session ID, falls back to a cross-profile style swap with a handoff.
+- *Other profile* (swap): fleet writes an automatic handoff first. If the outgoing admiral wrote a handoff since its session started (or passed `summary`), that text is kept; otherwise it is the last 40 lines of the admiral pane (trimmed, inside the 4 KB cap). Both get a first line: `Admiral profile swap at <time>: OLD → NEW. Previous session: <id> (resume: <old resume command>).` Then the reset path of §6.5 runs with the new profile: new session ID, boot prompt, generation + 1, `previous` = old ID. The boot prompt reaches the new CLI through the profile's `prompt_args` (copilot `-i`, claude positional); a profile without them gets it pasted once its TUI is ready.
+- The admiral's lean flags follow the CLI: copilot-pattern profiles keep §16a's args; claude-pattern profiles get `--mcp-config` with the fleet MCP server (stdio) and `--allowedTools mcp__fleet`.
+
+**Shown.** The admiral pane border reads `admiral · claude-personal · ctx 34%` (pane option `@fleet_admiral_profile`, set by up, reset, restart and swap, and refreshed by the overview loop from `session.json`). `fleet admiral` prints the profile after the session ID (`--json` already has `profile`). `fleet_status` and `fleet_brief` start with one line: `admiral: claude-personal · session 3f2a91c · gen 3`.
+
+**Persisted.** After a successful start (up with an explicit flag, swap, restart) the profile is written to `<home>/admiral/profile`. Reset (§6.5) keeps the running profile.
+
+**Failure keeps the old admiral.** All under the reset lock (`reset.lock`).
+- Unknown profile: error before anything changes (CLI exit 1, MCP tool error, picker status line).
+- After the respawn fleet watches the pane for 5 s (`FLEET_ADMIRAL_START_WAIT` overrides, for tests). If it dies (command not found, auth failure on start), fleet restores the old admiral: resume of the old session when the old profile has `resume` args and an ID, else a fresh old-profile admiral with the boot prompt. `session.json` and the persisted choice stay as they were, the handoff stays on disk, and the error ("admiral profile NAME failed to start; kept OLD") goes to the status line, stderr and the log.
+
+**Out of scope:** per-profile admiral settings beyond `[admiral] profile` (mode, extra args); context meters for non-Copilot admirals (still unknown, §6.5); moving chat history between CLIs; changing the profile of running agents.
 
 ---
 
@@ -477,18 +772,27 @@ The supervisor's chat fills up over a long day. Fleet does not compact it (ADR-4
 
 ---
 
+## 7a. Heat: a cap on working agents, spawn env, cheaper polling (ADR-23)
+
+Measured in `docs/perf.md`: an agent costs its CLI process (about 300-450 MB) and the CPU of whatever it runs, mostly builds and tests. Idle agents cost almost no CPU. So the heat lever is how many agents *work* at once, and how hard each one's toolchain runs.
+
+- **Working cap and spawn queue.** `max_working` in `[defaults]` of `config.toml` (default 4, `0` = no cap). Agents count as busy while their status is `working`, `stuck` or `starting`, and while `unknown` (just started) for at most 2 minutes, so agents whose screen never matches a pattern can't freeze the queue. A spawn also queues while other agents are queued or starting, so the queue stays first in, first out. `fleet spawn` and `fleet_spawn` with the cap reached write the agent to the board as `queued` (profile, dir and goal kept, no pane) and return at once. The overview TUI starts the oldest queued agent when a slot frees: at most one per poll, claimed under the board lock as `starting`, launched in the background so the poll never blocks. Nothing drains the queue while the overview TUI is not running; `fleet ls` still shows the queue. `fleet close` drops a queued agent; `fleet send` to one fails with "queued, not started yet". `fleet adopt` is not queued: it resumes a session the user picked by hand.
+- **Spawn env.** `env = { KEY = "value" }` in `[defaults]` or `[profile.<name>]` is added to the agent pane's environment on spawn and adopt, over the profile's own env; profile keys override default keys one by one. The repo sets nothing (ADR-13). The suggested local setting is `GOFLAGS = "-p=4", GOMAXPROCS = "4"` so parallel `go test ./...` runs don't each take every core.
+- **Off-wall polling.** The overview TUI captures panes on the wall every poll (1 s) and panes off the wall every 5 s. Status changes of hidden agents show up to 5 s later. `fleet ls` and `fleet_status` still capture every pane.
+- Out of scope: pausing or freezing an agent that is already working; parking (§7); per-agent CPU or memory limits (the user's `copilot.slice`, see `docs/perf.md`).
+
 ## 8. My additions
 
 These came up while writing this down and weren't in the conversation.
 
 1. **An attention queue, not just a grid.** With 40 tiles, colour alone doesn't tell me what to do next. `Tab` walks the waiting agents in order of how long they've waited, so clearing the queue means pressing Tab, then `a`, `x` or `s`, until nothing is yellow.
-2. **Rules for the supervisor.** It can read anything and send ordinary prompts. It must not approve, merge, push to a shared branch, `apply`, or kill agents without me confirming in the TUI. Any action that needs approval appears as a yellow card in the supervisor pane, and I approve it there with `a`.
-3. **Visible supervisor actions.** Every `fleet send` or `fleet spawn` the supervisor makes briefly flashes the target tile blue and is written to `decisions.log`. I should never wonder why an agent suddenly changed direction.
+2. **Rules for the admiral.** It can read anything and send ordinary prompts. It must not approve, merge, push to a shared branch, `apply`, or kill agents without me confirming in the TUI. Any action that needs approval appears as a yellow card in the admiral pane, and I approve it there with `a`.
+3. **Visible admiral actions.** Every `fleet send` or `fleet spawn` the admiral makes briefly flashes the target tile blue and is written to `decisions.log`. I should never wonder why an agent suddenly changed direction.
 4. **Pasting, not typing.** Use `tmux load-buffer` + `paste-buffer -p` (bracketed paste) instead of `send-keys` for prompts. Multi-line prompts don't get sent half-way, and tool input boxes handle pasted text better.
 5. **A worktree per agent in the same repo.** Two agents editing one checkout will collide. `fleet spawn --worktree` creates `git worktree add ../<repo>-<name>` and points the agent there.
 6. **Adopting the sessions I already have.** The current terminals aren't in tmux. `fleet adopt` resumes an existing session by ID inside fleet, so I can move over one at a time instead of starting from scratch.
 7. **Desktop notification when an agent goes yellow** (`notify-send`), with a minimum interval so 10 agents finishing together isn't 10 pop-ups. Optional sound.
-8. **Group by repo.** Rows are repos, and `1`–`9` jumps to one. Seeing all agents working on the same API repo together makes it easier to spot two agents doing the same work.
+8. **Group by repo.** Rows are repos, and `1`–`9` jumps to one. Seeing all of one project’s agents together makes it easier to spot two agents doing the same work.
 9. **Recording status changes.** `events.jsonl` costs almost nothing now and later answers questions like "how long do agents sit waiting on me".
 10. **Restart safety.** The TUI only reads state and tmux. Killing and restarting it changes nothing. Agents keep running because tmux owns them.
 
@@ -507,7 +811,7 @@ The approach is thin vertical slices. Each slice is 1–2 hours of work, ends wi
 | 4 | Motion and attention: spinner, pulse, Tab queue, peek overlay, send, approve | Clearing 3 waiting fake agents takes only Tab + `a` |
 | 5 | Real tools: spawn and resume for copilot and claude, then agy and vibe; capture real "waiting" patterns | A real Claude and Copilot agent on the wall with correct colours |
 | 6 | Park and wake, live cap, RAM guard, `adopt` | 40 tiles, at most 12 live processes, RAM under about 6 GB |
-| 7 | Supervisor pane, its `AGENTS.md`, summarising `peek`, reset key, approval cards | The supervisor reports what's waiting; `R` resets it without losing anything |
+| 7 | Admiral pane, its `AGENTS.md`, summarising `peek`, reset key, approval cards | The admiral reports what's waiting; `R` resets it without losing anything |
 | 8 | Control mode events instead of polling, hooks, notifications, worktrees, named walls | CPU use is low with 40 agents; desktop alert when one goes yellow |
 
 Slices 0–3 give a usable tiled wall of fake agents and are about a day of work. Slice 5 makes it useful for real work.
@@ -568,13 +872,15 @@ Each component lives in its own Go package with its own `_test.go` file. `make t
 |---|---|---|
 | tmux adapter (new window, capture, send/paste, join/swap pane, kill) | `internal/tmux` | Integration test against a throwaway tmux server: spawn `cat`, paste text, capture it back, move panes |
 | Status detector | `internal/status` | Table test over real pane captures stored in `testdata/<tool>/<state>.txt`. One file per tool per state; a tool UI change shows up as a failing case |
+| Teams (groups, colours, membership) | `internal/team` | Unit test in a temp directory: create/delete, add moves between teams, colour auto-pick and parse, survives reload, SameTeam |
+| What's new (embedded changelog, `feat` commit fallback, seen marker, build version) | `internal/whatsnew` | The embedded `CHANGELOG.md` parses with days newest first; parse of headings, refs and ids; seen file round trip and new marks; fallback against a temp git repo (HOME and GIT_CONFIG_GLOBAL pinned): uncited `feat` commits only, cited/CHANGELOG-touching/older ones dropped; repo detection from an exe path |
 | Board and cards store | `internal/board` | Unit test in a temp directory: write, read, concurrent update, broken JSON recovery |
 | Session discovery (list and search Copilot/Claude session stores for adopt) | `internal/sessions` | Unit test over fake session folders and transcripts in a temp dir: titles, filters, word search, suggested profile |
 | Tool adapters (spawn and resume command per tool, finding the session ID) | `internal/tools` | Unit test of the exact command lines; finding the session ID against a fake session folder |
 | Local spawn preferences (mode, auto-submit, extra args, local profile layer) | `internal/prefs` | Unit test in a temp directory via `FLEET_CONFIG`: missing file gives neutral defaults, `[profile.x]` beats `[defaults]`, broken TOML names the file |
 | Parking scheduler (cap, least recently used, RAM guard) | `internal/park` | Unit test with a fake clock and fake RAM readings |
-| Supervisor memory (§6.5) | `internal/supervisor` | Fill reads the last usage record from the tail of `events.jsonl`; handoff rotation keeps 20; notes format; colour band edges; reset respawns a fake supervisor on a `fleet-test-*` socket |
-| Summariser (`peek`) | `internal/summary` | Unit test with a fake model: cache hit when the pane hash is unchanged, at most 5 lines out, raw text never returned in supervisor mode |
+| Admiral memory (§6.5) | `internal/supervisor` | Fill reads the last usage record from the tail of `events.jsonl`; handoff rotation keeps 20; notes format; colour band edges; reset respawns a fake admiral on a `fleet-test-*` socket |
+| Summariser (`peek`) | `internal/summary` | Unit test with a fake model: cache hit when the pane hash is unchanged, at most 5 lines out, raw text never returned in admiral mode |
 | Approval gate (ADR-9) | `internal/gate` | Unit test: risky actions are held for approval, ordinary sends pass |
 | Wall manager (layouts, pin, swap out least recently used) | `internal/wall` | Integration test on a throwaway tmux server: bring 5 agents onto a 4-slot wall and check which one went back |
 | Overview TUI (tiles, colours, arrows, mouse, Tab queue) | `internal/ui` | `teatest`: send key and mouse events, compare the screen with a golden file |
@@ -608,7 +914,7 @@ The biggest maintenance risk is not the language. It's the four agent tools chan
 
 ## 13. Not in scope (for now)
 
-- Agents talking directly to each other. All coordination goes through the board and the supervisor.
+- Agents talking directly to each other. All coordination goes through the board and the admiral.
 - A web UI.
 - Running agents on other machines.
 
@@ -658,7 +964,7 @@ Why: changes show up in 1–2 seconds, and the dev loop costs no tokens or RAM.
 
 **ADR-9: the supervisor needs my approval for anything risky**
 Decision: the supervisor can read and send ordinary prompts. Approving, merging, pushing to shared branches, applying infrastructure or killing agents needs my `a` in the TUI.
-Why: a supervisor acting on 40 agents can do a lot of damage quickly.
+Why: A supervisor acting on 40 agents can do a lot of damage quickly.
 
 **ADR-11: hand off to a fresh supervisor instead of compacting** (R11, R21). *Builds on ADR-4.*
 Decision: the supervisor writes notes to `decisions.log` as it goes. At 70% context it writes a handoff and fleet respawns it with a new session that starts from `fleet_brief`. The fill is read from Copilot's own `events.jsonl` usage records. Warnings are added to MCP tool results, so the rule doesn't depend on the model remembering a prompt.
@@ -701,13 +1007,98 @@ Decision: the longest-waiting pane — or the active pane when nothing waits —
 Why: tiles of equal size spend the monitor evenly on work that needs me and work that doesn't; without the damping, resizing panes on every status change costs more than it gives.
 Rejected: zoom only (all or nothing, and hides the others); sizing every pane by status (layout churns on every status change); an `M-e` binding (the hint bar is full; the next key belongs to pinning).
 
+**ADR-17: teams are a coloured dot and a separate file** (R4, R9)
+Decision: a team is a named group with a colour, stored in `~/.fleet/teams.json` (not `board.json`). One team per agent. A team shows as a `◆` in its colour after the agent name on tiles, chips, wall borders and `fleet ls`; status keeps every other colour. Same team = implicit access grant for agent comms.
+Why: tile borders, text and pane borders already mean status; recolouring them by team would make a waiting agent hard to spot. A separate file means a running older binary rewriting `board.json` cannot drop team data. One team per agent keeps the dot and the access rule unambiguous.
+Rejected: recolouring rows/tiles/borders per team (fights the status colours); a `●` dot (it is the waiting glyph); team fields in `board.json` (lost by older writers); multi-team membership (no single colour; more than the request needs).
+
+**ADR-18: subagents come from the session event log, shown as status-coloured `•` on the tile's bottom row** (R4, R9)
+Decision: subagents are read incrementally from Copilot's `events.jsonl` (`subagent.started/completed`, `write_agent`, and a subagent's final tool-less turn, which is the only end signal after many re-wakes; a refused `write_agent` restores the previous state; a new turn of a finished subagent wakes it again), not scraped from the pane. Each shows as a `•` on line 4 of the tile, coloured by the subagent's state with the status palette (green running, grey done, red failed); running dots move as a colour wave on the existing animation tick.
+Why: the pane only shows the visible screen; subagent lines scroll off and background subagents leave nothing on screen, so pane counts are wrong exactly when several run. The log is complete, append-only and already has a session id per agent. Status colours keep the dots apart from team colours (ADR-17 left them out of the team palette), and a separate row and a smaller glyph keep them apart from the team `◆` and the waiting `●`.
+Rejected: pane scraping (only the visible screen; misses background work); team-palette or per-agent-type colours (clash with teams); blinking by hiding dots (the row changes width and flickers); a separate poller (the refresh loop already runs each second).
+
+**ADR-19: agents may message each other, on granted access, through an on-disk mailbox** (R11, R15). *Replaces the §18 "not recommended" line on agents talking directly.*
+Decision: messages and grants live in `~/.fleet/mail/` (flock + atomic rename). Agents reach them through an agent-scoped MCP server wired into copilot/claude spawns via profile data (`peer_args`), with a `fleet mail` CLI for every other tool. Access is requested per pair and is two-way once granted. The target agent or the user decides, the requester never does, and either side or the user can revoke.
+Why: the user asked for agents to coordinate directly. Files survive restarts and need no supervisor, matching ADR-4. MCP alone would leave out agy, vibe and agents already running. Grants stop agents from flooding or steering each other unasked.
+Rejected: A2A/HTTP endpoints per agent (the tools expose none; needs a daemon); MCP server push notifications (the CLIs don't surface them as turns); tmux send-keys alone (lost on restart and lands in approval prompts); open messaging without grants (the user asked for access on request).
+
+**ADR-20: agents report to the supervisor through the mailbox; reports wake an idle supervisor** (R11). *Builds on ADR-19.*
+Decision: `fleet_report` writes a `report` message to the reserved recipient `supervisor` and the latest report to the board. For done, blocked and question, it types one line into the supervisor pane only when that pane is idle, once per unread batch. Auto-closing an agent on `done` is an opt-in local preference, and only applies when the agent's work tree is clean and merged.
+Why: the supervisor otherwise has to poll screens to learn that work finished, and markers printed on screen get lost or misread. The mailbox already gives persistence, locking and the nudge rule.
+Rejected: scraping a `FLEET-DONE:` line (fragile; the tool UI wraps or redraws it); typing into a busy supervisor (it would land in the middle of a turn or of the user's own typing); auto-closing by default (closing loses the pane; the user must opt in).
+
+**ADR-21: recent changes are read live from git, read-only, in a tmux popup** (§5d). *Replaced by ADR-30.*
+Decision: `Alt-g` / `g` / a click on the status hint opens `fleet changes --popup`, which reads main, every worktree branch (`main..branch`) and dirty trees straight from git for the agents' repos, and shows a diff with `git show | less -R`. Only read commands run, with `GIT_OPTIONAL_LOCKS=0`. A status-line click outside the hint keeps tmux's default (`switch-client -t =`).
+Why: git already is the record of what agents added; reading it on demand costs about 70 ms and needs no state, so nothing can drift. A popup matches `Alt-?` and leaves the wall untouched.
+Rejected: a CHANGELOG kept in sync (fleet has none; `--markdown` prints a pasteable section instead of writing files); an index or cache of commits; listing branches without a worktree (noise from old branches).
+
+**ADR-22: the worker process reaches agents as a playbook prepended to the first prompt at spawn** (R11, R15). See §4 "Worker playbook".
+Decision: `fleet spawn` composes `playbook + "## Your task" + prompt`. The playbook is an embedded default, layered with `~/.fleet/worker.md` and the repo's `.fleet/worker.md` (append, or replace with a marker), and can be switched off in the local `config.toml`. It is short on purpose (about 30 lines).
+Why: it works for every tool profile (copilot, claude, agy, vibe, fake) through the prompt path that already exists, needs no file in the user's repo, and the user can read exactly what the agent got. The supervisor no longer has to repeat rules in each prompt and can't forget them.
+Rejected: MCP server instructions (only agents with the peer MCP server get them, and clients weight them weakly); generating an `AGENTS.md` into each worktree (clashes with the repo's own file and would get committed); a global `~/.copilot` or `~/.claude` instruction file (applies to every session on the machine, not just fleet workers, and differs per tool); a shared skill (agents load skills only when they think of it).
+
+**ADR-23: cap working agents with a spawn queue; throttle toolchains through local env** (R15). *Measured in `docs/perf.md`.*
+Decision: a fleet-wide `max_working` cap (default 4) queues new spawns instead of starting them; the overview TUI drains the queue FIFO. Toolchain limits (`GOFLAGS`, `GOMAXPROCS`) are a local `env` preference, not a repo default. Off-wall panes are captured every 5 s.
+Why: heat follows concurrently working agents and their builds, not open panes; idle agents use under 1 % of a core. A queue keeps the work without running it all at once. Queuing at spawn is simple and loses nothing; stopping a running agent would.
+Rejected: a cap on open agents (idle ones are cheap in CPU; §7 parking covers RAM); SIGSTOP or cgroup freeze of busy agents (breaks tool calls and network streams mid-turn); a built-in `GOMAXPROCS` (repo defaults stay neutral, ADR-13).
+
+**ADR-24: supervisor tools read prompts and press keys, gated like answers** (R11). *Builds on ADR-9.*
+Decision: fleet parses numbered pickers from the pane and lets the supervisor answer by option number or press allowlisted keys; any text or key sent to an agent on a prompt needs the same explicit confirmation as `fleet_answer`, and an answer can carry the confirmed question (`expect`) so a changed prompt is refused. Send verifies submission against a `pending` pattern (data, per tool). Peek is cleaned of chrome by default; facts about one agent come from `fleet_info` instead of peeks.
+Why: Copilot's approvals are 3-option pickers that y/n can't express, pasted prompts were sometimes left unsubmitted, and full-width box rows made peeks cost tokens for nothing.
+Rejected: free-form `send-keys` (C-c/C-d could kill the agent); typing the option digit (not verified on every tool's picker; arrows + Enter, as the pickers' own hint says, are); auto-answering safe-looking options (ADR-9).
+
+**ADR-25: `fleet mcp` re-execs itself in place when its binary changes** (R11, R15)
+Decision: before each request the MCP server stats its executable. When the file changed and `fleet mcp --probe` on the new file passes, it saves the unread input to a pending file and `syscall.Exec`s the new binary with the same argv. The new process sends `notifications/tools/list_changed`, serves the pending input and then stdin.
+Why: the supervisor's MCP process otherwise runs stale code until a handoff, and stale and current code then fight over the board. An in-place exec keeps the pid and the pipes, so the client stays connected and the chat survives. All state is on disk, so a fresh process loses nothing. The probe keeps a half-written or broken build from killing the server.
+Rejected: (a) a thin proxy shim in front of a backend that re-execs (works, but two processes and a protocol relay to maintain); (b) restarting the supervisor CLI with `--resume <session id>` (kept as the manual fallback; needed only when the instructions text changes); (c) a handoff to a fresh supervisor (loses the chat; last resort).
+
+**ADR-26: the top-level chat agent is called the admiral; the old name keeps working** (R11, R15)
+Decision: the agent earlier ADRs (4, 11, 20, 22, 24, 25) call the supervisor is the **admiral** wherever a user or an agent reads it: CLI, usage text, pane title, keys, prompts, MCP tool text, logs and docs. Kept as aliases: `fleet supervisor ...` (same handler, one deprecation line on stderr), `FLEET_SUPERVISOR_PROFILE`/`FLEET_SUPERVISOR_DIR`/`FLEET_SUP_HANDOFF_PCT` (used when the `FLEET_ADMIRAL_*` one is unset), `~/.fleet/supervisor/` and `~/.fleet/mail/supervisor/` (moved to `admiral/` on first use, the mailbox only under `mail.lock`, and left as symlinks to it, by `internal/legacy`), and `supervisor` as a reserved agent name next to `admiral`. Unchanged on purpose: the Go package `internal/supervisor` and every exported identifier that existed (`mail.Supervisor` now equals `mail.Admiral`), the `fleet_*` MCP tool names, tmux `@role sup`, and the repo dir `supervisor/` (the admiral's cwd, overridable with `FLEET_ADMIRAL_DIR`).
+Why: "admiral" fits a fleet and says it commands agents rather than runs processes. A running admiral on the old binary keeps calling `fleet supervisor reset` and writing the old paths, so both names must reach the same command and the same files during the rollout. Copilot's folder trust is keyed by path, and the live admiral's cwd is `supervisor/`.
+Rejected: renaming the Go package now (breaks four in-flight branches that import it); moving the repo dir (breaks the live cwd and asks for folder trust again on the next reset); a hard rename without aliases (the live session still uses the old names).
+
+**ADR-27: the admiral's profile is a choice; a swap hands off, a same-profile restart resumes** (R11, R21)
+Decision: the admiral profile comes from flag > env > last choice > `[admiral] profile` > copilot, and can be swapped live (`fleet admiral profile`, `Alt-P`, `fleet_admiral_profile`). A swap to another profile writes an automatic handoff and starts the new one with the boot prompt; a restart under the same profile resumes the same session. A start that dies within 5 s restores the old admiral.
+Why: R21 makes Copilot the default, not the only admiral; the user moves between accounts and CLIs during the day. Chat history can't cross CLIs, so the handoff (ADR-11) is the carrier; within one CLI `--resume` keeps the chat, which is also the manual fallback ADR-25 left open. Restoring the old admiral on failure means a typo or an expired login never leaves fleet without one.
+Rejected: (a) asking the outgoing admiral to write a handoff and waiting for it (slow, and the user may swap because it is stuck); the pane tail plus any handoff it wrote is enough with the board and notes on disk; (b) a static `display-menu` built at `fleet up` (goes stale when profiles change); (c) last choice below the config default (then a live swap would not survive `fleet up`).
+
+**ADR-29: auto-close judges the agent's own work against a spawn baseline; report wakes are queued, not dropped** (R11)
+Decision: spawn records the dir's git baseline (HEAD, dirty-path fingerprints, worktrees) on the board. A `done` agent auto-closes when its dir is not a git work tree, or when, compared to that baseline, it left no new or changed dirty paths, no dirty or unmerged worktree of its own and no moved, unmerged `HEAD`; a git error blocks. Agents without a baseline keep the strict clean-and-merged rule. Optional `auto_close_idle` re-checks idle done agents from the overview poll. A wake line for a busy admiral is queued on disk and typed by the overview poll when the admiral goes idle.
+Why: read-only reviewers in a plain folder, or in a checkout with someone else's uncommitted edits, reported done and stayed open with "not a git work tree" or "uncommitted changes", and a report that landed while the admiral was mid-turn was never typed. To the user it looked as if agents didn't report back. Comparing against the state at spawn tells the agent's work from earlier work without trusting the agent's word.
+Rejected: (a) a read-only flag at spawn (the admiral would have to set it right every time, and a mislabelled writer would be closed with its work); (b) closing whenever HEAD didn't move (misses uncommitted edits); (c) typing into a busy admiral pane (the text lands in the middle of its turn); (d) a retry loop in the reporting MCP process (it dies when the agent auto-closes 2 s later).
+
+**ADR-28: copy-mode copies go to the system clipboard through `copy-command`** (R6)
+Decision: `fleet up` sets the server option `copy-command` on fleet's own tmux server to the session's clipboard tool: `pbcopy` on macOS, `wl-copy` on Wayland, else `xclip` or `xsel` on X11. If none is found, the option is left alone. `set-clipboard` stays at tmux's default (`external`), and fleet's own text delivery keeps its named buffer (`load-buffer -b fleet-<pane>`, `paste-buffer -p -d`), which never writes the clipboard.
+Why: with `mouse on`, tmux takes the drag selection and only forwards it as OSC 52, which VTE terminals (Ptyxis, GNOME Terminal) ignore. A copy in any fleet pane went into a tmux buffer and never reached the system clipboard, so the user pasted something older. Piping to the clipboard tool works in every terminal, and in terminals that do honour OSC 52 both paths write the same text.
+Rejected: (a) `mouse off` (breaks R6 click-to-focus, border resizing and scrolling); (b) `set-clipboard on` (lets any agent in a pane overwrite the clipboard with OSC 52); (c) telling users to Shift-drag (works, but nobody finds it).
+
+**ADR-30: `Alt-g` shows fleet's own changelog, embedded in the binary, not the pane's git history** (§5d). *Replaces ADR-21.*
+Decision: the view reads a curated `CHANGELOG.md` (dated, one line per user-facing change, newest first) built in with `go:embed`, plus uncovered `feat` commits from fleet's own repo when the binary runs from it. A last-seen file marks unseen entries as new. Adding the line is part of done in the worker playbook.
+Why: the git view showed whatever repo the focused pane was in, so its content changed with the pane and was mostly other projects' commits; what I wanted was "what can fleet do now". Embedding means an installed binary knows its features without a checkout; the commit fallback catches features merged without a line.
+Rejected: generating the list from commit subjects only (many fleet commits are not conventional, and subjects describe the code, not what the user can do); reading the changelog from the checkout at runtime (an installed binary may have no checkout); keeping the git review in the same view (two unrelated lists under one key).
+
+**ADR-33: dead agent panes close themselves; the exit code comes from tmux** (§6.7, R11)
+Decision: the overview poll reads `#{pane_dead_status}` and `#{pane_dead_signal}` for agent panes (they keep `remain-on-exit on`). Exit 0 closes the agent at once with a `done` "exited, closed" report; anything else is reported `blocked` with the code and the last screen lines and closed after `dead_pane_grace` (default 5m, `0` at once, `off` never). The ADR-29 check still runs, but only adds a "left work behind" note: the pane is closed either way, since the dir, branch and the tool's session stay on disk and `fleet adopt` can pick them up. The first sighting is stored on the board (`exit`) so each death is reported once.
+Why: users end agents with `/exit`, and the dead pane then sat on the board and the wall as `error / process exited` until someone closed it by hand. An exited pane holds nothing the dir and session don't; a crash deserves a look first, hence the grace.
+Rejected: (a) scraping tmux's "Pane is dead (status N" banner (the format exists, and the banner is styled text that can change); (b) a `pane-died` hook running `fleet` (global per server, needs `fleet up` to re-apply, fires while fleet's own panes die too, and the overview already polls every agent pane each tick); (c) dropping `remain-on-exit` (the pane would vanish with its last screen, and the agent would turn `gone` with no exit code); (d) keeping dirty dead panes open (the work is in the dir, not the pane, so it only hid the problem on the board).
+
+**ADR-34: agents in one team, or one repo without a team, message each other without asking** (R11). *Amends ADR-19.*
+Decision: `[defaults] agent_mail` sets implicit access: `"team"` (default: same team, or same git repo when neither has a team), `"open"` (all) or `"ask"` (ADR-19's request for every pair). Other pairs keep the request and grant flow. An explicit grant or denial beats the policy, and revoking implicit access stores a denial. Every message stays logged and readable by the admiral (`fleet_access limit=N`) and the user (`fleet access log`).
+Why: asking per pair stalled work: coordinators like fleet-tui-coord waited on approvals for agents the user had already grouped. A team is the user's statement of who works together; a shared repo without a team is the same thing unstated. Across teams the request stays, because teams can be different clients or private projects (a client project next to the public fleet repo), and a message can carry their private data across.
+Rejected: `"open"` as the default (leaks across clients); keeping `"ask"` as the default (the friction that blocked work); same repo across teams (a team is the explicit boundary and wins); dropping the pair on revoke (the policy would reopen it at once).
+
+**ADR-35: project-management practice maps onto existing fleet parts, not new ceremony** (R11). *Builds on ADR-20, ADR-22, ADR-34.*
+Decision: ownership, definitions of ready and done, dependencies, a standard report shape, early escalation, a RAID log, WIP limits, a coordinator for overlapping work, scope control and a one-line retro go into the worker playbook and the admiral instructions as one line each, using spawn prompts, teams, `fleet_report` detail lines (`next:`, `risks:`, `decisions:`, `retro:`), `fleet_note` prefixes (`risk:`, `assumption:`, `issue:`, `decision:`), `fleet touching` and `max_working`. The mapping and reasons live in `docs/process.md`, not in the injected text.
+Why: the user treats fleet as part project management. Agents act on written rules literally, so a practice helps only where it changes an agent's next action; and the playbook is paid for on every spawn.
+Rejected: new tools or files for a RAID register, status documents or task boards (`fleet_note`, the board and `fleet_brief` already hold this); estimates, stand-ups and per-task RACI matrices (no action for an agent to take); putting the rationale in the playbook (tokens on every spawn).
+
 ---
 
-## 16a. Lean supervisor (R11)
+## 16a. Lean admiral (R11)
 
-The supervisor gets fleet as MCP tools (`fleet mcp`, wired in `supervisor/.mcp.json`) and nothing else. `fleet up` starts Copilot with `--no-custom-instructions --allow-all-mcp-server-instructions --available-tools fleet --allow-tool fleet`. Its rules live in `internal/mcp/instructions.md` and arrive as the MCP server instructions.
+The admiral gets fleet as MCP tools (`fleet mcp`, wired in `supervisor/.mcp.json`) and nothing else. `fleet up` starts Copilot with `--no-custom-instructions --allow-all-mcp-server-instructions --available-tools fleet --allow-tool fleet`. Its rules live in `internal/mcp/instructions.md` and arrive as the MCP server instructions.
 
-Measured on 2026-11-04 with the same one-line question: about 160k input tokens per turn with the default setup (global instructions, skills, every tool, and the fleet tools deferred behind a search, so the model fell back to bash) versus about 8–9k with the lean setup, and a direct `fleet_status` call in 4–7 seconds. The supervisor can't read Go code or run shell commands, because those tools aren't available to it.
+Measured on 2026-11-04 with the same one-line question: about 160k input tokens per turn with the default setup (global instructions, skills, every tool, and the fleet tools deferred behind a search, so the model fell back to bash) versus about 8–9k with the lean setup, and a direct `fleet_status` call in 4–7 seconds. The admiral can't read Go code or run shell commands, because those tools aren't available to it.
 
 ## 17. Development process (based on Anthropic's Claude Code best practices)
 
@@ -722,14 +1113,15 @@ Source: https://code.claude.com/docs/en/best-practices (fetched 2026-11-04).
 | One agent writes, another reviews | A separate reviewer agent reads each slice's diff against this spec. The builder doesn't review its own work. |
 | Run independent work in parallel with subagents | Builder (code), designer (layout), researcher (tool sessions and hooks) run at the same time; each gets a narrow brief and reports back briefly. |
 | Course-correct early | Small commits every working piece; I watch `git log` and the running TUI and redirect the builder by message, not by restarting it. |
+| Put repeated instructions where they load automatically | Fleet's own workers get the worker playbook at spawn (§4, ADR-22); the admiral stops repeating process rules in prompts. |
 
 ---
 
 ## 18. Review after the prototype (2026-11-04): what would make it a real agentic fleet manager
 
-State at review: about 3,900 lines of Go. Built: tmux substrate, tool profiles, scraped status, overview grid, live wall (incl. smarter tiling, §5b: status-aware eviction, screen-sized grid, emphasis pane), lean Copilot supervisor over MCP (`fleet_status/peek/send/answer/spawn/profiles/close/wall`). Missing: park/wake, summaries, workflows, worktrees, real status patterns for Claude, agy and vibe.
+State at review: about 3,900 lines of Go. Built: tmux substrate, tool profiles, scraped status, overview grid, live wall (incl. smarter tiling, §5b: status-aware eviction, screen-sized grid, emphasis pane), lean Copilot admiral over MCP (`fleet_status/peek/send/answer/spawn/profiles/close/wall`). Missing: park/wake, summaries, workflows, worktrees, real status patterns for Claude, agy and vibe.
 
-The gap: fleet today manages **sessions**. Agentic work is about **tasks** (a goal, a place to do it, a definition of done, a result, dependencies). The supervisor can poke panes, but it has nothing to plan against and no way to know when work is actually finished.
+The gap: fleet today manages **sessions**. Agentic work is about **tasks** (a goal, a place to do it, a definition of done, a result, dependencies). The admiral can poke panes, but it has nothing to plan against and no way to know when work is actually finished.
 
 ### Priority 1: needed for live testing now
 
@@ -745,10 +1137,10 @@ The gap: fleet today manages **sessions**. Agentic work is about **tasks** (a go
 | # | Change | Why |
 |---|---|---|
 | 5 | **Task card on spawn**: goal, repo, **done-check** (command + expected exit code), result file. Stored in the board. | Same rule as my loop guide: no machine-checkable done condition, no loop. Lets fleet mark a tile ✅ done only when the check passes, not when the agent says so. |
-| 6 | **Result file**: every spawned agent gets told to write `~/.fleet/agents/<name>/result.md` (what changed, branch, open questions) when it finishes | The supervisor reads results instead of screens: cheaper, and nothing gets lost when an agent is closed. |
-| 7 | **`fleet run plan.yaml`**: a small workflow file: tasks with profile, dir, prompt, done-check and `after:` dependencies. Fleet starts tasks as their dependencies finish, up to the live cap. The supervisor can write these plans via an MCP tool (`fleet_plan`). | This is the actual agentic workflow: fan out, wait, fan in. Keeps the plan on disk (ADR-4), so a supervisor reset loses nothing. |
+| 6 | **Result file**: every spawned agent gets told to write `~/.fleet/agents/<name>/result.md` (what changed, branch, open questions) when it finishes | The admiral reads results instead of screens: cheaper, and nothing gets lost when an agent is closed. |
+| 7 | **`fleet run plan.yaml`**: a small workflow file: tasks with profile, dir, prompt, done-check and `after:` dependencies. Fleet starts tasks as their dependencies finish, up to the live cap. The admiral can write these plans via an MCP tool (`fleet_plan`). | This is the actual agentic workflow: fan out, wait, fan in. Keeps the plan on disk (ADR-4), so an admiral reset loses nothing. |
 | 8 | **Review step as a task type**: after an implement task passes its check, fleet can spawn a reviewer agent (different profile/model) on the same worktree | Writer and reviewer separated, as in the Claude Code guide. |
-| 9 | **Recipes**: named spawn presets (`review-pr`, `implement-story`, `fix-ci`) = profile + prompt template + done-check | One keypress or one supervisor call instead of re-typing prompts. |
+| 9 | **Recipes**: named spawn presets (`review-pr`, `implement-story`, `fix-ci`) = profile + prompt template + done-check | One keypress or one admiral call instead of re-typing prompts. |
 
 ### Priority 3: running 40 at once
 
@@ -756,17 +1148,33 @@ The gap: fleet today manages **sessions**. Agentic work is about **tasks** (a go
 |---|---|---|
 | 10 | **Park/wake + live cap + RAM guard** (§7) | Still the RAM fix; needed beyond about 15 real agents. |
 | 11 | **Spend per agent**: read tokens/credits from Copilot `events.jsonl` and Claude transcripts; show on the tile; optional per-task cap | Agentic workflows can burn credits silently. |
-| 12 | **Stuck rule**: same error twice or no progress for N minutes → tile red, agent paused, supervisor told | Mirrors the "same failure twice, stop" rule; stops grinding. |
+| 12 | **Stuck rule**: same error twice or no progress for N minutes → tile red, agent paused, admiral told | Mirrors the "same failure twice, stop" rule; stops grinding. |
 | 13 | **Waiting agents come to me**: optional auto-placement of the longest-waiting agent on the wall, plus a desktop notification | Less hunting; the wall shows what needs me. |
-| 14 | **Supervisor reset key + context tile** (§6.3, §6.5). **Built 2026-11-04:** notes, handoff, context meter, `M-R`/`R` reset (ADR-11). | The lean supervisor is cheap now, but long days still fill it. |
+| 14 | **Admiral reset key + context tile** (§6.3, §6.5). **Built 2026-11-04:** notes, handoff, context meter, `M-R`/`R` reset (ADR-11). | The lean admiral is cheap now, but long days still fill it. |
 | 15 | **A hard floor under the wall grid**: refuse to place one more pane (and say so) once the grid would drop every pane below a readable size, instead of tiling ever smaller | §5b.2 currently prefers a cramped pane to a hidden agent; past some point a 41×12 pane is just wrapped garbage. Needs a floor number from live use. |
 | 16 | **Pin a pane to the wall** (`M-p` / `@fleet_pin`): eviction class 0 already exists and is read, nothing sets it | §5b.1 is built around it; it is the one key binding worth spending (§5b.3 deliberately skipped `M-e`). |
 
 ### Not recommended
 
 - Auto-answering approval prompts. It saves clicks but removes the gate (ADR-9). At most, an allowlist per recipe, later.
-- Agents talking to each other directly. Keep coordination through task cards and result files.
+- ~~Agents talking to each other directly.~~ Superseded by ADR-19 (§6.6): allowed on granted access. Task cards and result files stay the main way to coordinate work.
 
 ### Suggested order for the next builder slices
 
 1 → 2 → 4 → 5 + 6 → 3 → 7 → 10, then the rest as live testing shows the need.
+
+### Future work: remote agent runtime (idea only, not scheduled)
+
+Run the agents in the cloud instead of on the laptop, which overheats with many agents. The goal is to run the existing CLI agents (copilot, claude and the rest) unchanged, each in its own container or pod with the full context it needs: repo checkout or worktree, tool config, MCP servers, credentials and session state. The local fleet TUI and admiral attach to their terminals remotely. A Talos Linux Kubernetes cluster is one possible host. This is a large addition that needs infrastructure prepared outside this repo: the cluster, auth and secrets, networking, and a cost budget.
+
+The runtime is an open choice:
+- A plain pod per agent, attached through tmux or a TTY.
+- Devcontainers.
+- Something similar.
+- kagent was considered and is probably not suitable: it runs its own agent framework instead of the existing CLIs.
+
+Open questions:
+- How panes and tmux map to pods.
+- Session persistence when a pod restarts.
+- Secret handling for agent credentials.
+- Latency of the live wall over the network.

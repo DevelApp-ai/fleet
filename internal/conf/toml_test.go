@@ -13,7 +13,7 @@ top = "x" # comment
 command = "claude"
 args = ["--model", "claude-sonnet-5"]
 env = { CLAUDE_CONFIG_DIR = "/h/.claude-work", A = 'b' }
-waiting = ['\[y/n\]', "Do you # want"]
+waiting = ['\[y/n\]', "Do you # want", '\[Paste #\d+'] # comment
 `)
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ waiting = ['\[y/n\]', "Do you # want"]
 	if Map(s, "env")["CLAUDE_CONFIG_DIR"] != "/h/.claude-work" || Map(s, "env")["A"] != "b" {
 		t.Fatalf("env %v", Map(s, "env"))
 	}
-	if !reflect.DeepEqual(List(s, "waiting"), []string{`\[y/n\]`, "Do you # want"}) {
+	if !reflect.DeepEqual(List(s, "waiting"), []string{`\[y/n\]`, "Do you # want", `\[Paste #\d+`}) {
 		t.Fatalf("waiting %v", List(s, "waiting"))
 	}
 	if _, err := Parse("bad line"); err == nil {

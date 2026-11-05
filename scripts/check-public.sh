@@ -5,7 +5,8 @@
 # Fails when a commit in the range:
 #   - has an author or committer email not listed in .git/info/public-emails
 #   - leaves a tree containing a home path, a pattern from .git/info/public-deny,
-#     or an email address that is not allowed
+#     or an email address that is not allowed. Lines matching .git/info/public-allow
+#     (default: the placeholder /home/user) are ignored.
 #   - is flagged by gitleaks (if installed)
 # Both files live in the git dir, so they are never committed. One pattern or email per line.
 set -euo pipefail
@@ -22,6 +23,8 @@ mapfile -t allowed < <(grep -v -e '^#' -e '^$' "$emails_file")
 ok_args=()
 for a in "${allowed[@]}"; do ok_args+=(-e "$a"); done
 deny='/home/[a-z]'
+allow='/home/user\b'
+[[ ! -s $info/public-allow ]] || allow="$allow|$(grep -v -e '^#' -e '^$' "$info/public-allow" | paste -sd'|')"
 if [[ -s $deny_file ]]; then
   while IFS= read -r p; do [[ -z $p || $p == \#* ]] || deny+="|$p"; done <"$deny_file"
 fi
@@ -36,7 +39,7 @@ for c in $commits; do
 done
 
 tip=$(head -1 <<<"$commits")
-if git grep -n -I -i -E "$deny" "$tip" -- . ':!scripts/check-public.sh' >&2; then
+if git grep -n -I -i -E "$deny" "$tip" -- . ':!scripts/check-public.sh' | grep -v -E "$allow" >&2; then
   err "personal or denied strings in $(git log -1 --format=%h "$tip") (above)"
 fi
 if git grep -I -h -o -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}' "$tip" \

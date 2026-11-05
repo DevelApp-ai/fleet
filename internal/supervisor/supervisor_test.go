@@ -66,8 +66,8 @@ func TestFillUnknown(t *testing.T) {
 func TestSessionIDFromCommand(t *testing.T) {
 	for cmd, want := range map[string]string{
 		`bash -lc 'exec copilot --session-id 3f2a91c0-1111-4222-8333-444455556666 --no-custom-instructions'`: "3f2a91c0-1111-4222-8333-444455556666",
-		`copilot --session-id=abc`:                      "abc",
-		`bash -lc 'exec /x/fleet fakeagent supervisor'`: "",
+		`copilot --session-id=abc`:                   "abc",
+		`bash -lc 'exec /x/fleet fakeagent admiral'`: "",
 	} {
 		if got := SessionIDFromCommand(cmd); got != want {
 			t.Errorf("%s: got %q want %q", cmd, got, want)
@@ -94,13 +94,13 @@ func TestNotes(t *testing.T) {
 	home := t.TempDir()
 	now = func() time.Time { return time.Date(2026, 11, 4, 21, 40, 0, 0, time.Local) }
 	t.Cleanup(func() { now = time.Now })
-	AppendNote(home, "bs-nav", "user wants a ping\nwhen done")
+	AppendNote(home, "web-nav", "user wants a ping\nwhen done")
 	AppendNote(home, "", "prefers short replies")
 	if err := AppendNote(home, "", "  "); err == nil {
 		t.Error("empty note must fail")
 	}
 	got := TailNotes(home, 30)
-	want := []string{"2026-11-04T21:40 [bs-nav] user wants a ping when done", "2026-11-04T21:40 prefers short replies"}
+	want := []string{"2026-11-04T21:40 [web-nav] user wants a ping when done", "2026-11-04T21:40 prefers short replies"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("%q", got)
 	}
@@ -136,6 +136,7 @@ func TestHandoffRotationKeeps20(t *testing.T) {
 }
 
 func TestBandEdges(t *testing.T) {
+	t.Setenv("FLEET_ADMIRAL_HANDOFF_PCT", "")
 	t.Setenv("FLEET_SUP_HANDOFF_PCT", "")
 	for pct, want := range map[int]string{0: theme.Green, 39: theme.Green, 40: theme.Yellow, 69: theme.Yellow, 70: theme.Red, 100: theme.Red} {
 		if got := Band(pct); got != want {
@@ -145,6 +146,22 @@ func TestBandEdges(t *testing.T) {
 	t.Setenv("FLEET_SUP_HANDOFF_PCT", "60")
 	if Band(59) != theme.Yellow || Band(60) != theme.Red || Threshold() != 60 {
 		t.Error("threshold from env")
+	}
+}
+
+func TestThresholdEnv(t *testing.T) {
+	t.Setenv("FLEET_ADMIRAL_HANDOFF_PCT", "")
+	t.Setenv("FLEET_SUP_HANDOFF_PCT", "55")
+	if Threshold() != 55 {
+		t.Errorf("deprecated env: %d", Threshold())
+	}
+	t.Setenv("FLEET_ADMIRAL_HANDOFF_PCT", "80")
+	if Threshold() != 80 {
+		t.Errorf("new env must win: %d", Threshold())
+	}
+	t.Setenv("FLEET_SUP_HANDOFF_PCT", "")
+	if Threshold() != 80 {
+		t.Errorf("new env alone: %d", Threshold())
 	}
 }
 
@@ -204,5 +221,49 @@ func TestHandoffNamesSortByTime(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "h0,h1" {
 		t.Errorf("lexical order %v", got)
+	}
+}
+
+func TestLegacySupervisorDirMigrates(t *testing.T) {
+	home := t.TempDir()
+	old := filepath.Join(home, "supervisor")
+	os.MkdirAll(old, 0o755)
+	os.WriteFile(filepath.Join(old, "session.json"), []byte(`{"session_id":"s0","generation":3}`), 0o644)
+	s, ok := Load(home)
+	if !ok || s.SessionID != "s0" || s.Generation != 3 {
+		t.Fatalf("load: %+v %v", s, ok)
+	}
+	if _, err := os.Stat(filepath.Join(home, "admiral", "session.json")); err != nil {
+		t.Fatal("session.json not under admiral/:", err)
+	}
+	if st, err := os.Lstat(old); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("supervisor/ is not a symlink")
+	}
+	s.Generation = 4
+	if err := Save(home, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteHandoff(home, "next"); err != nil {
+		t.Fatal(err)
+	}
+	// an old binary reading the old path sees the new files
+	if b, err := os.ReadFile(filepath.Join(old, "handoff.md")); err != nil || string(b) != "next\n" {
+		t.Fatalf("handoff via old path: %q %v", b, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(old, "session.json")); !strings.Contains(string(b), `"generation": 4`) {
+		t.Fatalf("session via old path: %s", b)
+	}
+}
+
+func TestFreshAdmiralDirGetsLegacyLink(t *testing.T) {
+	home := t.TempDir()
+	if err := Save(home, Session{SessionID: "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Lstat(filepath.Join(home, "admiral")); err != nil || !st.IsDir() {
+		t.Fatal("admiral/ missing")
+	}
+	if dst, err := os.Readlink(filepath.Join(home, "supervisor")); err != nil || dst != "admiral" {
+		t.Fatalf("legacy link: %q %v", dst, err)
 	}
 }

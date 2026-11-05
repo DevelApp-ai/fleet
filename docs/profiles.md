@@ -1,6 +1,6 @@
 # Tool profiles
 
-A profile tells fleet how to start one tool variant: which command, which arguments, which environment, and which status patterns to use. `fleet spawn <name> <profile>` and the supervisor's `fleet_spawn` both take a profile name.
+A profile tells fleet how to start one tool variant: which command, which arguments, which environment, and which status patterns to use. `fleet spawn <name> <profile>` and the admiral's `fleet_spawn` both take a profile name.
 
 ## Built-in profiles
 

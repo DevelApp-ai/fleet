@@ -4,6 +4,7 @@ package tools
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,9 @@ type Profile struct {
 	// SessionPath is a glob (with {id} and a leading ~) where the tool stores a
 	// session; used by adopt to check it exists. Empty = no check.
 	SessionPath string
+	// SubagentLog is the tool's session event log (with {id} and a leading ~),
+	// read for subagent dots (DESIGN.md §4 Subagents). Empty = no dots.
+	SubagentLog string
 
 	// PromptArgs carry the initial prompt at launch, with {prompt} substituted.
 	// When set and a prompt is given, fleet does not paste afterwards.
@@ -38,6 +42,9 @@ type Profile struct {
 	// Ready is a regex that means "the TUI is accepting input". Empty = fall
 	// back to the profile's status patterns.
 	Ready string
+	// PeerArgs wire the agent-scoped fleet MCP server (DESIGN §6.6), with
+	// {peer_mcp} / {peer_mcp_claude}. Inserted straight after the command.
+	PeerArgs []string
 }
 
 // HasMode reports whether the profile knows the named starting mode.
@@ -50,7 +57,8 @@ func (p Profile) HasMode(mode string) bool {
 	return a || k
 }
 
-// Defaults are the built-in profiles. {fleet} is the fleet executable, {name} the agent name.
+// Defaults are the built-in profiles. {fleet} is the fleet executable, {name}
+// the agent name, {peer_mcp}/{peer_mcp_claude} the agent's peer MCP config.
 const Defaults = `
 [copilot]
 command = "copilot"
@@ -59,7 +67,9 @@ mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan", interactiv
 launch_id = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
 session_path = "~/.copilot/session-state/{id}"
+subagent_log = "~/.copilot/session-state/{id}/events.jsonl"
 patterns = "copilot"
+peer_args = ["--additional-mcp-config", "{peer_mcp}"]
 
 [claude-copilot]
 command = "copilot"
@@ -69,7 +79,9 @@ mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan", interactiv
 launch_id = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
 session_path = "~/.copilot/session-state/{id}"
+subagent_log = "~/.copilot/session-state/{id}/events.jsonl"
 patterns = "copilot"
+peer_args = ["--additional-mcp-config", "{peer_mcp}"]
 
 [claude]
 command = "claude"
@@ -78,6 +90,7 @@ mode_args = { accept-edits = "--permission-mode acceptEdits", plan = "--permissi
 launch_id = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
 session_path = "~/.claude/projects/*/{id}.jsonl"
+peer_args = ["--mcp-config", "{peer_mcp_claude}"]
 patterns = "claude"
 
 [agy]
@@ -165,6 +178,9 @@ func apply(p *Profile, sec map[string]conf.Value) {
 	if v, ok := sec["session_path"]; ok {
 		p.SessionPath, _ = v.(string)
 	}
+	if v, ok := sec["subagent_log"]; ok {
+		p.SubagentLog, _ = v.(string)
+	}
 	if v, ok := sec["prompt_args"]; ok {
 		p.PromptArgs, _ = v.([]string)
 	}
@@ -176,6 +192,9 @@ func apply(p *Profile, sec map[string]conf.Value) {
 	}
 	if v, ok := sec["ready"]; ok {
 		p.Ready, _ = v.(string)
+	}
+	if v, ok := sec["peer_args"]; ok {
+		p.PeerArgs, _ = v.([]string)
 	}
 }
 
@@ -202,11 +221,30 @@ func Names(ps map[string]Profile) []string {
 	return n
 }
 
-// Vars are substituted into command and args.
-type Vars struct{ Fleet, Name, ID string }
+// Vars are substituted into command and args. PeerMCP and PeerMCPClaude are
+// the peer MCP configs (see PeerMCP); when both are empty PeerArgs are left out.
+type Vars struct{ Fleet, Name, ID, PeerMCP, PeerMCPClaude string }
 
 func (v Vars) expand(s string) string {
-	return strings.NewReplacer("{fleet}", v.Fleet, "{name}", v.Name, "{id}", v.ID).Replace(s)
+	return strings.NewReplacer("{fleet}", v.Fleet, "{name}", v.Name, "{id}", v.ID,
+		"{peer_mcp_claude}", v.PeerMCPClaude, "{peer_mcp}", v.PeerMCP).Replace(s)
+}
+
+// PeerMCP returns the one-server MCP configs that run `exe mcp --agent name`
+// as "fleet-peer": copilot's schema (type local, tools) and Claude's (stdio).
+func PeerMCP(exe, name string) (copilot, claude string) {
+	args := []string{"mcp", "--agent", name}
+	cp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"fleet-peer": map[string]any{
+		"type": "local", "command": exe, "args": args, "tools": []string{"*"}}}})
+	cl, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"fleet-peer": map[string]any{
+		"type": "stdio", "command": exe, "args": args}}})
+	return string(cp), string(cl)
+}
+
+// AgentVars are the Vars for launching agent name: fleet exe, id and peer MCP.
+func AgentVars(exe, name, id string) Vars {
+	cp, cl := PeerMCP(exe, name)
+	return Vars{Fleet: exe, Name: name, ID: id, PeerMCP: cp, PeerMCPClaude: cl}
 }
 
 // Launch describes everything beyond the profile that shapes one command line.
@@ -227,6 +265,11 @@ type Launch struct {
 // is ready. An unknown mode is ignored (see Profile.HasMode).
 func (p Profile) Argv(v Vars, l Launch) (argv []string, embedded bool) {
 	argv = []string{v.expand(p.Command)}
+	if v.PeerMCP != "" || v.PeerMCPClaude != "" {
+		for _, a := range p.PeerArgs {
+			argv = append(argv, v.expand(a))
+		}
+	}
 	for _, a := range p.Args {
 		argv = append(argv, v.expand(a))
 	}
@@ -254,8 +297,18 @@ func (p Profile) Argv(v Vars, l Launch) (argv []string, embedded bool) {
 }
 
 // SessionGlob returns SessionPath with {id} substituted and a leading ~ expanded.
-func (p Profile) SessionGlob(id string) string {
-	g := strings.ReplaceAll(p.SessionPath, "{id}", id)
+func (p Profile) SessionGlob(id string) string { return expandPath(p.SessionPath, id) }
+
+// SubagentLogPath returns SubagentLog for a session id ("" when unset or id is empty).
+func (p Profile) SubagentLogPath(id string) string {
+	if p.SubagentLog == "" || id == "" {
+		return ""
+	}
+	return expandPath(p.SubagentLog, id)
+}
+
+func expandPath(s, id string) string {
+	g := strings.ReplaceAll(s, "{id}", id)
 	if g == "~" || strings.HasPrefix(g, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			g = home + g[1:]
@@ -284,7 +337,7 @@ func ShellCommand(argv []string) string {
 	return "bash -lc " + Quote("exec "+strings.Join(q, " "))
 }
 
-// EnvList returns KEY=VAL pairs ($VAR expanded) including a PATH with ~/.local/bin first.
+// EnvList returns KEY=VAL pairs including a PATH with ~/.local/bin first.
 func (p Profile) EnvList() []string {
 	home, _ := os.UserHomeDir()
 	var out []string

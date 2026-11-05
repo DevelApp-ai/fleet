@@ -3,36 +3,59 @@ package fleet
 import (
 	"hash/fnv"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/logx"
 	"github.com/sturlabragason/fleet/internal/status"
 	"github.com/sturlabragason/fleet/internal/theme"
+	"github.com/sturlabragason/fleet/internal/tmux"
 )
 
 // Refresh captures every agent pane, updates statuses on the board, logs
 // transitions and returns the agents sorted by name.
 func (f *Fleet) Refresh() ([]*board.Agent, error) {
-	panes, _ := f.T.ListPanes("")
+	panes, perr := f.T.ListPanes("")
+	if perr != nil {
+		logx.For("status").Debug("list panes", "err", perr)
+	}
 	byAgent := map[string]bool{}
 	dead := map[string]bool{}
+	onWall := map[string]bool{}
 	ids := map[string]string{}
+	var agentPanes []tmux.PaneInfo
 	tagged := map[string]string{}
+	deadPanes := map[string]tmux.PaneInfo{}
 	for _, p := range panes {
 		if p.Agent != "" {
 			byAgent[p.Agent] = true
 			dead[p.Agent] = p.Dead
+			if p.Dead {
+				deadPanes[p.Agent] = p
+			}
 			ids[p.Agent] = p.ID
+			onWall[p.Agent] = !strings.HasPrefix(p.Window, WindowPrefix)
+			agentPanes = append(agentPanes, p)
 			tagged[p.Agent] = p.Status
 		}
 	}
 	now := time.Now()
 	var out []*board.Agent
+	var claimed *board.Agent
 	err := f.Store.Update(func(b *board.Board) error {
 		for _, a := range b.Agents {
 			prev := a.Status
-			next := f.classify(a, byAgent[a.Name], dead[a.Name], ids[a.Name], now)
+			var next string
+			if f.skipCapture(a, byAgent[a.Name] && !dead[a.Name], onWall[a.Name], now) {
+				next = a.Status
+			} else {
+				next = f.classify(a, byAgent[a.Name], dead[a.Name], ids[a.Name], now)
+			}
+			if perr == nil {
+				// A tmux hiccup must not end every running subagent.
+				f.subagents(a, byAgent[a.Name] && !dead[a.Name], now)
+			}
 			if next != prev {
 				a.Status, a.StatusSince = next, now
 				logx.For("status").Info("transition", "agent", a.Name, "from", prev, "to", next, "line", a.LastLine)
@@ -44,14 +67,71 @@ func (f *Fleet) Refresh() ([]*board.Agent, error) {
 				f.tagPane(id, next, a.StatusSince)
 			}
 		}
+		// A failed pane listing makes every agent look gone (busy 0):
+		// never drain on that.
+		if f.DrainQueue && perr == nil {
+			claimed = f.claimQueued(b, now)
+		}
 		out = b.Sorted()
 		return nil
 	})
+	if claimed != nil {
+		go f.startQueued(claimed)
+	}
+	f.syncTeams(agentPanes)
+	if f.DrainQueue && perr == nil {
+		f.DeliverWake()
+		f.sweepDone(out, now)
+		f.reapDead(out, deadPanes, now)
+	}
 	return out, err
+}
+
+// skipCapture reports whether this Refresh may reuse an agent's last status
+// instead of capturing its pane: only for a live, known agent that is off the
+// wall and was captured less than OffWallEvery ago.
+func (f *Fleet) skipCapture(a *board.Agent, alive, wall bool, now time.Time) bool {
+	if f.OffWallEvery <= 0 {
+		return false
+	}
+	if f.lastCap == nil {
+		f.lastCap = map[string]time.Time{}
+	}
+	st := status.Status(a.Status)
+	if wall || !alive || pending(a.Status) || st == "" || st == status.Unknown || st == status.Gone || now.Sub(f.lastCap[a.Name]) >= f.OffWallEvery {
+		f.lastCap[a.Name] = now
+		return false
+	}
+	return true
+}
+
+// syncTeams keeps @fleet_team/@fleet_team_color on agent panes in line with
+// teams.json, touching a pane only when its tags differ.
+func (f *Fleet) syncTeams(panes []tmux.PaneInfo) {
+	if f.Teams == nil {
+		return
+	}
+	by := f.Teams.ByAgent()
+	for _, p := range panes {
+		want := by[p.Agent]
+		if p.Team == want.Team && p.TeamColor == want.Color {
+			continue
+		}
+		if want.Team == "" {
+			f.T.UnsetPaneOption(p.ID, "@fleet_team")
+			f.T.UnsetPaneOption(p.ID, "@fleet_team_color")
+			continue
+		}
+		f.T.SetPaneOption(p.ID, "@fleet_team_color", want.Color)
+		f.T.SetPaneOption(p.ID, "@fleet_team", want.Team)
+	}
 }
 
 func (f *Fleet) classify(a *board.Agent, alive, dead bool, pane string, now time.Time) string {
 	if !alive {
+		if pending(a.Status) {
+			return keepPending(a, now)
+		}
 		return string(status.Gone)
 	}
 	a.PaneID = pane

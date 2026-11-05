@@ -22,6 +22,11 @@ const (
 	Idle    Status = "idle"
 	Unknown Status = "unknown"
 	Gone    Status = "gone"
+	// Queued is a spawn held back by the working cap (DESIGN §7a): on the
+	// board with no pane yet.
+	Queued Status = "queued"
+	// Starting is a queued agent claimed by the overview TUI and being launched.
+	Starting Status = "starting"
 )
 
 // DefaultPatterns, per tool. Detect reads the last Window non-empty lines:
@@ -33,6 +38,9 @@ const (
 //     Lines matching `transcript` (the scrolling conversation) only count
 //     when they are its last content line, so prompt text an agent merely
 //     quoted earlier in its work doesn't make it look blocked.
+//     Then a `pending` match (text pasted into the input box but not
+//     submitted, e.g. Copilot's "[Paste #1 - 13 lines]") is waiting too, with
+//     waiting_for "unsubmitted input: …".
 //  2. otherwise the bottom-most line that matches error, working or idle
 //     decides (within one line: error > working > idle). That is normally the
 //     tool's footer, so text quoted in the transcript above it doesn't count.
@@ -50,6 +58,7 @@ idle = ['^>\s*$', '^✔ Done']
 
 [copilot]
 transcript = ['^[^┃].*┃\s*$']
+pending = ['^┃ \[Paste #\d+']
 waiting = ['needs information\.', 'Do you want to', '\[y/n\]', 'Allow .* to run', '❯ 1\. Yes', '○ Asking user', '↑/↓ (to )?(select|navigate) · enter']
 error = ['^✖', '(?i)^error:']
 working = ['(?i)esc (esc )?(to )?interrupt', '(?i)^\s*(\S+ · )*\S? ?working · ', '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]', '(?i)^\s*\S? ?thinking']
@@ -78,6 +87,7 @@ idle = ['^\s*[>❯]\s*$']
 type Set struct {
 	Waiting, Error, Working, Idle []*regexp.Regexp
 	Transcript                    []*regexp.Regexp // lines of the scrolling conversation
+	Pending                       []*regexp.Regexp // unsubmitted input in the prompt box
 }
 
 // Sets maps pattern-set name to Set.
@@ -98,7 +108,7 @@ func Load(home string) Sets {
 				continue
 			}
 			s := out[name]
-			for k, dst := range map[string]*[]*regexp.Regexp{"waiting": &s.Waiting, "error": &s.Error, "working": &s.Working, "idle": &s.Idle, "transcript": &s.Transcript} {
+			for k, dst := range map[string]*[]*regexp.Regexp{"waiting": &s.Waiting, "error": &s.Error, "working": &s.Working, "idle": &s.Idle, "transcript": &s.Transcript, "pending": &s.Pending} {
 				if l, ok := sec[k].([]string); ok {
 					*dst = compile(name, l)
 				}
@@ -176,6 +186,9 @@ func (s Set) Match(text string) (Status, string, bool) {
 			}
 		}
 	}
+	if l, ok := s.pending(lines, skip); ok {
+		return Waiting, PendingPrefix + l, true
+	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		l := lines[i]
 		for _, c := range []struct {
@@ -190,6 +203,28 @@ func (s Set) Match(text string) (Status, string, bool) {
 		}
 	}
 	return Unknown, "", false
+}
+
+// PendingPrefix starts waiting_for when the only reason is unsubmitted input.
+const PendingPrefix = "unsubmitted input: "
+
+// Unsubmitted reports unsubmitted input in the prompt box and its cleaned line.
+func (s Set) Unsubmitted(text string) (string, bool) {
+	lines := Tail(text, Window)
+	skip := make([]bool, len(lines))
+	for i, l := range lines {
+		skip[i] = matchAny(s.Transcript, l)
+	}
+	return s.pending(lines, skip)
+}
+
+func (s Set) pending(lines []string, skip []bool) (string, bool) {
+	for i, l := range lines {
+		if !skip[i] && matchAny(s.Pending, l) {
+			return clean(l), true
+		}
+	}
+	return "", false
 }
 
 func matchAny(rs []*regexp.Regexp, l string) bool {

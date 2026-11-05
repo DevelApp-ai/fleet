@@ -1,0 +1,21 @@
+  Current   Sessions   Issues   Pull requests   Gists
+   cd /home/user/src/fleet.wt/teams && python3 - <<'EOF' impor… ┃
+                                                                        ┃
+ ● Spec updated. Running the checks before dispatching the builder.     ┃
+                                                                        ┃
+ ~/src/fleet [⎇ main]                   Session: 206.99 AIC used
+╭──────────────────────────────────────────────────────────────────────╮
+│ Allow directory access                                               │
+│ ╭──────────────────────────────────────────────────────────────────╮ │
+│ │ /home/user/src/web-ui.wt/nav                             │ │
+│ ╰──────────────────────────────────────────────────────────────────╯ │
+│ Do you want to allow this?                                           │
+│                                                                      │
+│   1. Yes                                                             │
+│ ❯ 2. Yes, and add these directories to the allowed list              │
+│   3. No, and tell Copilot what to do differently (Esc to stop)       │
+│                                                                      │
+│ ↑/↓ to navigate · enter to select · esc to cancel                    │
+╰──────────────────────────────────────────────────────────────────────╯
+ ◎ Working · 54.1 KiB esc esc interrupt
+ctx ████░░░░ 50% (99k/200k)  pool ████░░░░ 54% (6.6/12G)

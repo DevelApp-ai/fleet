@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,6 +12,10 @@ import (
 func main() {
 	logx.Init()
 	if err := run(os.Args[1:]); err != nil {
+		var code exitCode
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		fmt.Fprintln(os.Stderr, "fleet:", err)
 		os.Exit(1)
 	}

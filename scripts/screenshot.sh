@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate docs/img/hero.png and docs/img/demo.gif from fake agents.
 # Runs a separate tmux server (own TMUX_TMPDIR and FLEET_HOME), so a running
-# fleet is never touched. The supervisor pane runs the fake profile: no tokens.
+# fleet is never touched. The admiral pane runs the fake profile: no tokens.
 # Needs: tmux, python3 with Pillow + fontTools, ImageMagick (magick).
 set -eu
 cd "$(dirname "$0")/.."
@@ -9,7 +9,7 @@ ROOT=$PWD
 make build >/dev/null
 D=$(mktemp -d)
 mkdir -m 700 "$D/tmux"
-export TMUX_TMPDIR="$D/tmux" FLEET_HOME="$D/home" FLEET_SUPERVISOR_PROFILE=fake
+export TMUX_TMPDIR="$D/tmux" FLEET_HOME="$D/home" FLEET_ADMIRAL_PROFILE=fake
 unset TMUX
 B=$ROOT/bin/fleet
 cleanup() {

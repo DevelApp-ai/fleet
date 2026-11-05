@@ -1,27 +1,35 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/fake"
 	"github.com/sturlabragason/fleet/internal/fleet"
-	"github.com/sturlabragason/fleet/internal/mcp"
 	"github.com/sturlabragason/fleet/internal/prefs"
 	"github.com/sturlabragason/fleet/internal/sessions"
+	"github.com/sturlabragason/fleet/internal/status"
+	"github.com/sturlabragason/fleet/internal/team"
 	"github.com/sturlabragason/fleet/internal/tools"
-	"github.com/sturlabragason/fleet/internal/wall"
 )
 
 const usage = `usage:
-  fleet up                                  start/attach the fleet (supervisor + overview + wall)
+  fleet up                                  start/attach the fleet (admiral + overview + wall)
+  fleet [--admiral-profile NAME] up [--no-attach]
+                                            run the admiral under profile NAME (alone: fleet up); default
+                                            $FLEET_ADMIRAL_PROFILE, last choice, [admiral] profile, copilot
   fleet ui                                  run the overview TUI in this terminal
   fleet spawn <name> <profile> [dir] ["prompt"]
+                                            queued instead when max_working agents are busy;
+                                            the overview TUI starts it when a slot frees
   fleet spawn --fake <name> [dir]           shorthand for profile "fake"
   fleet adopt [--name N] [--dir D] [--force] [profile] <id | words...>
                                             resume an existing session (started outside fleet) as an agent;
@@ -32,19 +40,51 @@ const usage = `usage:
   fleet send <name> "text"
   fleet peek <name> [--raw] [-n 200]
   fleet close <name>                        stop an agent and remove it from the board
-  fleet mcp                                 stdio MCP server for the supervisor
-  fleet supervisor [--json]                 supervisor session, context fill, generation, uptime
-  fleet supervisor reset [--handoff]        replace the supervisor with a fresh session (M-R)
+  fleet team ls [--json]                    teams with colour and members (running members marked)
+  fleet team create <team> [colour]         new empty team; colour: blue, pink, teal, mauve, sky, sapphire or #rrggbb
+  fleet team delete <team>                  remove the team; its agents keep running
+  fleet team add <team> <agent>...          add agents (moves them from another team; creates the team)
+  fleet team rm <team> <agent>...           take agents out of the team
+  fleet team color <team> <colour>          change the team colour
+  fleet team send <team> "text"             paste into every running member
+  fleet team show|hide <team>               put running members on the wall / take them off
+  fleet team close <team> [--yes]           close every member (asks y/N unless --yes)
+  fleet mcp [--agent NAME]                  stdio MCP server: admiral tools, or the agent peer tools
+                                            with --agent or when run inside an agent pane; re-execs itself
+                                            in place when the fleet binary changes (--probe: self-check)
+  fleet mail [--as NAME] agents | inbox [--all] [-n N] | send <to|*> "text"
+             | request <to> ["reason"] | grant <who> | deny <who> | revoke <who>
+                                            message other agents (free within a team or repo, else on request); --as defaults to this pane's agent
+  fleet access [ls] | log [-n N] | grant A B | deny A B | revoke A B
+                                            list, read or decide agent-to-agent access
+  fleet report [--as NAME] <done|blocked|question|progress> "summary"
+                                            report to the admiral (for agents without MCP)
+  fleet admiral [--json]                    admiral session, context fill, generation, uptime
+  fleet admiral reset [--handoff]           replace the admiral with a fresh session (M-R)
+  fleet admiral profile [NAME | --pick]     show the admiral's profile, or swap it (hands off; Alt-P picks)
+  fleet admiral restart                     restart the admiral, resuming the same session
+                                            ("fleet supervisor ..." still works: deprecated alias)
   fleet note [--agent NAME] "text"          append a note to ~/.fleet/decisions.log
+  fleet playbook [dir]                      print the worker playbook prepended to a spawn prompt in dir
+                                            (built-in + ~/.fleet/worker.md + the repo's .fleet/worker.md)
+  fleet touching [-C dir] [--json] [file...]
+                                            files other worktrees of this repo change; with files, only
+                                            the overlaps (exit 0 none, 1 overlap, 2 error)
   fleet profiles                            list tool profiles (~/.fleet/tools.toml)
   fleet wall <apply|refresh|preset N|show NAME|emphasis>   wall control (used by tmux key bindings)
   fleet keys [--markdown]                   list every hotkey (Alt-? in tmux, ? in the overview)
+  fleet changes [--json]                    what's new in fleet: its latest features, newest first (Alt-g)
 
 local preferences (never committed): ~/.config/fleet/config.toml ($FLEET_CONFIG overrides)
-  sets the starting mode (e.g. copilot autopilot), extra args and prompt auto-submit;
+  sets the starting mode (e.g. copilot autopilot), extra args, prompt auto-submit and
+  the worker playbook (playbook = false turns it off);
   see examples/config.toml.example`
 
 func run(args []string) error {
+	args, err := topLevelProfile(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -57,14 +97,22 @@ func run(args []string) error {
 		fake.Run(name, os.Stdin, os.Stdout)
 		return nil
 	}
-	if cmd == "keys" { // needs no fleet state
+	switch cmd { // need no fleet state or tmux
+	case "keys":
 		return cmdKeys(rest)
+	case "playbook":
+		return cmdPlaybook(rest)
+	case "touching":
+		return cmdTouching(rest)
+	}
+	if cmd == "changes" {
+		return cmdChanges(rest)
 	}
 	f, err := fleet.Open()
 	if err != nil {
 		return err
 	}
-	switch cmd {
+	switch commandName(cmd) {
 	case "spawn":
 		return cmdSpawn(f, rest)
 	case "adopt":
@@ -85,18 +133,26 @@ func run(args []string) error {
 			return fmt.Errorf("usage: fleet close <name>")
 		}
 		return f.Close(rest[0])
+	case "team":
+		return cmdTeam(f, rest)
 	case "mcp":
-		return mcp.New(f, wall.New(f.T, fleet.Session)).Serve(os.Stdin, os.Stdout)
+		return cmdMCP(f, rest)
+	case "mail":
+		return cmdMail(f, rest)
+	case "access":
+		return cmdAccess(f, rest)
+	case "report":
+		return cmdReport(f, rest)
 	case "profiles":
 		for _, n := range tools.Names(f.Profiles) {
 			p := f.Profiles[n]
-			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", ID: "<id>"}, tools.Launch{})
+			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", ID: "<id>", PeerMCP: "<peer-mcp>", PeerMCPClaude: "<peer-mcp>"}, tools.Launch{})
 			fmt.Printf("%-16s %s  (patterns=%s)\n", n, strings.Join(argv, " "), p.Patterns)
 		}
 		fmt.Printf("\nprofiles: built-in + %s + [profile.*] in %s\n", tools.Path(f.Home), prefs.Path())
 		return nil
-	case "supervisor":
-		return cmdSupervisor(f, rest)
+	case "admiral": // also "supervisor", the deprecated alias (commandName, ADR-26)
+		return cmdAdmiral(f, cmd, rest)
 	case "note":
 		return cmdNote(f, rest)
 	case "ui":
@@ -143,6 +199,10 @@ func cmdSpawn(f *fleet.Fleet, args []string) error {
 	ag, err := f.Spawn(name, profile, dir, prompt)
 	if err != nil {
 		return err
+	}
+	if ag.Status == string(status.Queued) {
+		fmt.Printf("queued %s (%d busy, max_working %d)\n", ag.Name, f.Busy(), f.Prefs.MaxWorking())
+		return nil
 	}
 	fmt.Printf("spawned %s (%s) in %s pane %s\n", ag.Name, ag.Profile, ag.Dir, ag.PaneID)
 	return nil
@@ -231,21 +291,69 @@ func cmdLs(f *fleet.Fleet, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(args) > 0 && args[0] == "--json" {
-		e := json.NewEncoder(os.Stdout)
+	return writeLs(os.Stdout, as, f.Teams.ByAgent(), len(args) > 0 && args[0] == "--json")
+}
+
+// lsAgent adds team fields to the JSON of an agent without touching board.Agent.
+type lsAgent struct {
+	*board.Agent
+	Team      string `json:"team,omitempty"`
+	TeamColor string `json:"team_color,omitempty"`
+}
+
+// writeLs prints the agent table. The TEAM column appears only when a listed
+// agent has a team, so the output without teams is unchanged.
+func writeLs(out io.Writer, as []*board.Agent, teams map[string]team.Info, asJSON bool) error {
+	if asJSON {
+		e := json.NewEncoder(out)
 		e.SetIndent("", "  ")
-		return e.Encode(as)
+		if len(teams) == 0 {
+			return e.Encode(as)
+		}
+		ls := make([]lsAgent, len(as))
+		for i, a := range as {
+			ls[i] = lsAgent{Agent: a, Team: teams[a.Name].Team, TeamColor: teams[a.Name].Color}
+		}
+		return e.Encode(ls)
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPROFILE\tSTATUS\tFOR\tPANE\tLAST LINE")
+	withTeam := false
+	for _, a := range as {
+		if teams[a.Name].Team != "" {
+			withTeam = true
+		}
+	}
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
+	if withTeam {
+		fmt.Fprintln(w, "NAME\tTEAM\tPROFILE\tSTATUS\tFOR\tPANE\tLAST LINE")
+	} else {
+		fmt.Fprintln(w, "NAME\tPROFILE\tSTATUS\tFOR\tPANE\tLAST LINE")
+	}
+	colors := []string{""}
 	for _, a := range as {
 		ll := a.LastLine
 		if len(ll) > 60 {
 			ll = ll[:60]
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Profile, a.Status, time.Since(a.StatusSince).Round(time.Second), a.PaneID, ll)
+		name := a.Name
+		if withTeam {
+			ti := teams[a.Name]
+			cell := ""
+			if ti.Team != "" {
+				cell = teamMark + " " + ti.Team
+			}
+			name += "\t" + cell
+			colors = append(colors, ti.Color)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, a.Profile, a.Status, time.Since(a.StatusSince).Round(time.Second), a.PaneID, ll)
 	}
-	return w.Flush()
+	w.Flush()
+	table := buf.String()
+	if withTeam {
+		table = colourMarks(table, strings.Index(table, "TEAM"), colors)
+	}
+	_, err := io.WriteString(out, table)
+	return err
 }
 
 func cmdPeek(f *fleet.Fleet, args []string) error {

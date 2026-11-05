@@ -4,3 +4,4 @@
 /.work/
 .env
 *.local.toml
+PUBLISHING.md

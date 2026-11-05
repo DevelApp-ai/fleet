@@ -17,6 +17,7 @@ import (
 
 func memServer(t *testing.T) (*Server, *int, *int) {
 	t.Helper()
+	t.Setenv("FLEET_ADMIRAL_HANDOFF_PCT", "")
 	t.Setenv("FLEET_SUP_HANDOFF_PCT", "")
 	home := t.TempDir()
 	tc := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
@@ -65,23 +66,28 @@ func TestContextWarning(t *testing.T) {
 	}
 	*pct = 74
 	out, _ := callText(t, s, "fleet_peek", map[string]any{"name": "nobody"})
-	if !strings.HasSuffix(out, "\n\n[supervisor context 74%: "+warnTail) {
+	if !strings.HasSuffix(out, "\n\n[admiral context 74%: "+warnTail) {
 		t.Errorf("error result needs the warning too: %q", out)
 	}
 	out, _ = callText(t, s, "fleet_handoff", map[string]any{"summary": "x"})
 	if strings.Contains(out, warnTail) {
 		t.Errorf("fleet_handoff must not carry the warning: %q", out)
 	}
+	s.SwapProfile = func(string) error { return nil }
+	out, _ = callText(t, s, "fleet_admiral_profile", map[string]any{"profile": "copilot"})
+	if strings.Contains(out, warnTail) {
+		t.Errorf("fleet_admiral_profile must not carry the warning: %q", out)
+	}
 }
 
 func TestNoteBriefHandoff(t *testing.T) {
 	s, _, resets := memServer(t)
 	home := s.F.Home
-	if _, isErr := callText(t, s, "fleet_note", map[string]any{"text": "tell user when bs-nav is done", "agent": "bs-nav"}); isErr {
+	if _, isErr := callText(t, s, "fleet_note", map[string]any{"text": "tell user when web-nav is done", "agent": "web-nav"}); isErr {
 		t.Fatal("note failed")
 	}
 	b, _ := os.ReadFile(filepath.Join(home, "decisions.log"))
-	if !strings.HasSuffix(string(b), " [bs-nav] tell user when bs-nav is done\n") {
+	if !strings.HasSuffix(string(b), " [web-nav] tell user when web-nav is done\n") {
 		t.Errorf("decisions.log %q", b)
 	}
 	if _, isErr := callText(t, s, "fleet_note", map[string]any{"text": " "}); !isErr {
@@ -102,9 +108,15 @@ func TestNoteBriefHandoff(t *testing.T) {
 	}
 
 	out, isErr := callText(t, s, "fleet_brief", nil)
-	for _, want := range []string{"## Handoff (", "asked user about deploy", "## Notes", "[bs-nav] tell user", "## Agents", "no agents"} {
+	for _, want := range []string{"## Handoff (", "asked user about deploy", "## Notes", "[web-nav] tell user", "## Agents", "no agents"} {
 		if isErr || !strings.Contains(out, want) {
 			t.Errorf("brief missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestResetShellUsesAdmiral(t *testing.T) {
+	if got := resetShell("'/x/fleet'"); got != "sleep 2; '/x/fleet' admiral reset --handoff >/dev/null 2>&1" {
+		t.Errorf("%q", got)
 	}
 }

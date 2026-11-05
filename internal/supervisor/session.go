@@ -1,6 +1,8 @@
-// Package supervisor keeps the supervisor's memory on disk (DESIGN.md §6.5):
+// Package supervisor keeps the admiral's memory on disk (DESIGN.md §6.5):
 // the current session record, notes in decisions.log, handoffs, and the
-// context meter read from Copilot's own usage records.
+// context meter read from Copilot's own usage records. The package keeps its
+// pre-ADR-26 name (the admiral was called the supervisor) so in-flight
+// branches that import it keep compiling.
 package supervisor
 
 import (
@@ -8,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sturlabragason/fleet/internal/legacy"
 )
 
-// BootPrompt starts a fresh supervisor after a reset.
-const BootPrompt = "You are taking over as fleet supervisor. Call fleet_brief, tell the user in 1–3 lines what needs them, then wait."
+// BootPrompt starts a fresh admiral after a reset.
+const BootPrompt = "You are taking over as fleet admiral. Call fleet_brief, tell the user in 1–3 lines what needs them, then wait."
 
-// Session is the current supervisor, stored in <home>/supervisor/session.json.
+// Session is the current admiral, stored in <home>/admiral/session.json.
 type Session struct {
 	SessionID  string    `json:"session_id"`
 	Profile    string    `json:"profile"`
@@ -23,8 +27,16 @@ type Session struct {
 	Previous   string    `json:"previous,omitempty"`
 }
 
-// Dir is <home>/supervisor.
-func Dir(home string) string { return filepath.Join(home, "supervisor") }
+// Dir is <home>/admiral. A <home>/supervisor dir from before ADR-26 is moved
+// there and left as a symlink, so older binaries share the same files.
+func Dir(home string) string {
+	return legacy.MoveDir(filepath.Join(home, "admiral"), filepath.Join(home, "supervisor"))
+}
+
+// mkdir creates Dir(home) (and the legacy symlink) and returns it.
+func mkdir(home string) (string, error) {
+	return legacy.MkdirAll(filepath.Join(home, "admiral"), filepath.Join(home, "supervisor"))
+}
 
 func sessionPath(home string) string { return filepath.Join(Dir(home), "session.json") }
 
@@ -40,7 +52,7 @@ func Load(home string) (Session, bool) {
 
 // Save writes session.json atomically.
 func Save(home string, s Session) error {
-	if err := os.MkdirAll(Dir(home), 0o755); err != nil {
+	if _, err := mkdir(home); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(s, "", "  ")

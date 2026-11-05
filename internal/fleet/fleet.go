@@ -4,6 +4,7 @@
 package fleet
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,8 +14,11 @@ import (
 
 	"github.com/sturlabragason/fleet/internal/board"
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/mail"
+	"github.com/sturlabragason/fleet/internal/playbook"
 	"github.com/sturlabragason/fleet/internal/prefs"
 	"github.com/sturlabragason/fleet/internal/status"
+	"github.com/sturlabragason/fleet/internal/team"
 	"github.com/sturlabragason/fleet/internal/tmux"
 	"github.com/sturlabragason/fleet/internal/tools"
 )
@@ -41,6 +45,26 @@ type Fleet struct {
 	Patterns status.Sets
 	// Prefs are the local, uncommitted spawn preferences (ADR-13).
 	Prefs *prefs.Prefs
+	// Teams is teams.json in the same home (DESIGN.md §5c).
+	Teams *team.Store
+	// Paste types a mail nudge into a pane and presses Enter; nil = tmux
+	// paste (tests replace it).
+	Paste func(pane, text string) error
+	// SupPane finds the admiral pane and whether it looks idle; nil =
+	// tmux and the admiral profile's patterns (tests replace it).
+	SupPane func() (pane string, idle bool)
+	// CloseLater schedules closing an agent after its report returns; nil =
+	// tmux run-shell (tests replace it).
+	CloseLater func(name string) error
+	// OffWallEvery is how often Refresh captures an agent pane that is not
+	// on the wall; 0 = every Refresh. The overview TUI sets it (DESIGN §7a).
+	OffWallEvery time.Duration
+	// DrainQueue lets Refresh start the oldest queued agent when a working
+	// slot is free. Only the overview TUI sets it (DESIGN §7a).
+	DrainQueue bool
+	lastCap    map[string]time.Time
+	sweep      doneSweep
+	dead       deadReaper
 }
 
 // Open builds a Fleet on the default socket and ~/.fleet.
@@ -65,22 +89,30 @@ func New(t *tmux.Client, home, exe string) (*Fleet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Fleet{T: t, Store: board.NewStore(home), Home: home, Exe: exe, Profiles: ps, Patterns: status.Load(home), Prefs: pr}, nil
+	return &Fleet{T: t, Store: board.NewStore(home), Home: home, Exe: exe, Profiles: ps, Patterns: status.Load(home), Prefs: pr, Teams: team.NewStore(home)}, nil
 }
+
+// errNotStarting: a queued agent was closed or changed while it was launched.
+var errNotStarting = errors.New("no longer starting (closed while launching)")
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`)
 
+// validName reports whether name can be an agent name. "user", "admiral" and
+// its old name "supervisor" are reserved mailbox names (DESIGN §6.6, §6.7).
+func validName(name string) bool {
+	return nameRe.MatchString(name) && name != mail.User && name != mail.Admiral && name != mail.LegacySupervisor
+}
+
 // Spawn starts an agent in its own hidden window.
 func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
-	if !nameRe.MatchString(name) {
+	if !validName(name) {
 		return nil, fmt.Errorf("bad name %q", name)
 	}
-	p, ok := f.Profiles[profile]
-	if !ok {
+	if _, ok := f.Profiles[profile]; !ok {
 		return nil, fmt.Errorf("unknown profile %q (have %v)", profile, tools.Names(f.Profiles))
 	}
-	if _, exists := f.Store.Load().Agents[name]; exists {
-		if f.paneOf(name) != "" {
+	if old, exists := f.Store.Load().Agents[name]; exists {
+		if pending(old.Status) || f.paneOf(name) != "" {
 			return nil, fmt.Errorf("agent %q already exists", name)
 		}
 	}
@@ -89,6 +121,23 @@ func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
+	}
+	if a, err := f.enqueue(name, profile, dir, prompt); a != nil || err != nil {
+		return a, err
+	}
+	// The busy count and the launch are not one critical section, so two
+	// concurrent spawns can both see the last free slot: the cap is
+	// best-effort and may be exceeded by one per racing spawn.
+	return f.launch(name, profile, dir, prompt, false)
+}
+
+// launch builds the argv for a profile and starts it: the real start behind
+// Spawn and the queue drain. The first prompt is built here only. claimed is
+// true for a queued agent the drain marked starting (see start).
+func (f *Fleet) launch(name, profile, dir, prompt string, claimed bool) (*board.Agent, error) {
+	p, ok := f.Profiles[profile]
+	if !ok {
+		return nil, fmt.Errorf("unknown profile %q (have %v)", profile, tools.Names(f.Profiles))
 	}
 	id := ""
 	if len(p.LaunchID) > 0 {
@@ -99,14 +148,43 @@ func (f *Fleet) Spawn(name, profile, dir, prompt string) (*board.Agent, error) {
 		logx.For("fleet").Warn("unknown mode for profile; ignoring", "agent", name, "profile", profile, "mode", pr.Mode)
 		pr.Mode = ""
 	}
-	argv, embedded := p.Argv(tools.Vars{Fleet: f.Exe, Name: name, ID: id},
-		tools.Launch{Mode: pr.Mode, Extra: pr.ExtraArgs, Prompt: prompt, NoPromptArgs: !pr.AutoSubmit})
-	a, err := f.start(name, profile, p, dir, prompt, id, argv)
+	// The worker playbook goes in front of the first prompt only; the board
+	// keeps the user's prompt as the goal (DESIGN §4, ADR-22). No prompt, no
+	// playbook.
+	full := prompt
+	if pr.Playbook && prompt != "" {
+		text, src := playbook.Resolve(f.Home, dir)
+		full = playbook.Compose(text, prompt)
+		logx.For("fleet").Info("playbook", "agent", name, "sources", src, "bytes", len(full)-len(prompt))
+	}
+	argv, embedded := launchArgv(name, p, tools.AgentVars(f.Exe, name, id),
+		tools.Launch{Mode: pr.Mode, Extra: pr.ExtraArgs, Prompt: full, NoPromptArgs: !pr.AutoSubmit})
+	base := Baseline(dir) // before the agent can touch anything
+	a, err := f.start(name, profile, p, dir, prompt, full, id, argv, claimed, base)
 	if err != nil {
 		return nil, err
 	}
-	f.autostart(f.T, time.Sleep, a.PaneID, p, pr, prompt, embedded)
+	f.autostart(f.T, time.Sleep, a.PaneID, p, pr, full, embedded)
 	return a, nil
+}
+
+// MaxLaunchCmd caps the shell command a spawn hands to tmux new-window with
+// the prompt embedded. tmux rejects commands over about 16KB ("command too
+// long"), and the playbook makes first prompts long.
+const MaxLaunchCmd = 12000
+
+// launchArgv builds the launch argv; when an embedded prompt would make the
+// command too long for tmux, it rebuilds without it so the prompt goes via
+// the paste path instead.
+func launchArgv(name string, p tools.Profile, v tools.Vars, l tools.Launch) ([]string, bool) {
+	argv, embedded := p.Argv(v, l)
+	if n := len(tools.ShellCommand(argv)); embedded && n > MaxLaunchCmd {
+		logx.For("fleet").Warn("prompt too long for the launch command; pasting it instead",
+			"agent", name, "profile", p.Name, "bytes", n, "max", MaxLaunchCmd)
+		l.NoPromptArgs = true
+		argv, embedded = p.Argv(v, l)
+	}
+	return argv, embedded
 }
 
 // redactArgv replaces an embedded first prompt with a placeholder so the whole
@@ -127,9 +205,23 @@ func redactArgv(argv []string, prompt string) []string {
 }
 
 // start runs argv in a new hidden agent window, tags the pane and writes the
-// board entry. Shared by Spawn and Adopt.
-func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, id string, argv []string) (*board.Agent, error) {
+// board entry. Shared by Spawn, Adopt and the queue drain. goal is the board
+// goal; secret is the text redacted from the logged argv (the full first
+// prompt). claimed: the board entry must still be "starting" once the pane
+// exists, else the agent was closed mid-launch and the new pane is killed.
+// base is the dir's git baseline (nil for Adopt).
+func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, secret, id string, argv []string, claimed bool, base *board.GitBase) (*board.Agent, error) {
 	log := logx.For("fleet")
+	if extra := f.Prefs.For(profile).Env; len(extra) > 0 {
+		env := make(map[string]string, len(p.Env)+len(extra))
+		for k, v := range p.Env {
+			env[k] = v
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		p.Env = env
+	}
 	pane, err := f.T.Spawn(Session, WindowPrefix+name, dir, p.EnvList(), tools.ShellCommand(argv))
 	if err != nil {
 		log.Error("spawn failed", "agent", name, "err", err)
@@ -140,17 +232,36 @@ func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, id strin
 	f.T.SetPaneOption(pane, "remain-on-exit", "on")
 	f.T.Run("set-option", "-s", "-t", Session, "escape-time", "10")
 	f.T.Run("set-option", "-g", "mouse", "on")
+	if afterTag != nil {
+		afterTag(f, pane)
+	}
 	now := time.Now()
 	a := &board.Agent{Name: name, Profile: profile, Patterns: p.Patterns, Dir: dir, Goal: goal, SessionID: id,
-		PaneID: pane, Status: string(status.Unknown), Created: now, StatusSince: now, LastChange: now}
-	if err := f.Store.Update(func(b *board.Board) error { b.Agents[name] = a; return nil }); err != nil {
+		PaneID: pane, Status: string(status.Unknown), Created: now, StatusSince: now, LastChange: now, Baseline: base}
+	if err := f.Store.Update(func(b *board.Board) error {
+		old, ok := b.Agents[name]
+		if claimed {
+			// A Refresh between the pane tag and this write may already have
+			// adopted this pane and reclassified it; that is still our claim.
+			if !ok || (old.Status != string(status.Starting) && old.PaneID != pane) {
+				return errNotStarting
+			}
+			a.Created = old.Created // a queued agent keeps its place in time
+		}
+		b.Agents[name] = a
+		return nil
+	}); err != nil {
 		f.T.KillPane(pane)
 		log.Error("board write failed", "agent", name, "err", err)
 		return nil, err
 	}
-	log.Info("started", "agent", name, "profile", profile, "dir", dir, "pane", pane, "session_id", id, "argv", redactArgv(argv, goal))
+	log.Info("started", "agent", name, "profile", profile, "dir", dir, "pane", pane, "session_id", id, "argv", redactArgv(argv, secret))
 	return a, nil
 }
+
+// afterTag, when set by a test, runs between tagging a new pane and the
+// board write in start.
+var afterTag func(f *Fleet, pane string)
 
 // paneOf finds the live pane for an agent by its @fleet_agent tag.
 func (f *Fleet) paneOf(name string) string {
@@ -168,17 +279,79 @@ func (f *Fleet) Pane(name string) (string, error) {
 	if p := f.paneOf(name); p != "" {
 		return p, nil
 	}
+	if a, ok := f.Store.Load().Agents[name]; ok && pending(a.Status) {
+		return "", fmt.Errorf("agent %q is %s, not started yet", name, a.Status)
+	}
 	return "", fmt.Errorf("agent %q not running", name)
 }
 
-// Send pastes text into the agent and presses Enter.
+// SubmitPause is the wait between pasting and pressing Enter, and
+// SubmitWait how long Send watches for a paste the tool did not submit.
+var (
+	SubmitPause = 150 * time.Millisecond
+	SubmitWait  = 2 * time.Second
+)
+
+// Send pastes text into the agent and presses Enter. When the agent's
+// patterns have `pending` and the paste still sits unsubmitted after
+// SubmitWait, it presses Enter once more, then gives up with an error.
 func (f *Fleet) Send(name, text string) error {
 	p, err := f.Pane(name)
 	if err != nil {
 		return err
 	}
 	logx.For("fleet").Info("send", "agent", name, "bytes", len(text))
-	return f.T.Paste(p, text, true)
+	if err := f.T.Paste(p, text, false); err != nil {
+		return err
+	}
+	time.Sleep(SubmitPause)
+	if err := f.T.SendKeys(p, "Enter"); err != nil {
+		return err
+	}
+	set := f.setOf(name)
+	if len(set.Pending) == 0 || !f.unsubmitted(p, set, SubmitWait) {
+		return nil
+	}
+	// Enter on a prompt that came up meanwhile would answer it (ADR-9).
+	if w, _ := f.Prompting(name); w != "" {
+		return fmt.Errorf("pasted but not submitted; try fleet_send keys=[Enter]")
+	}
+	logx.For("fleet").Warn("paste not submitted; pressing Enter again", "agent", name)
+	if err := f.T.SendKeys(p, "Enter"); err != nil {
+		return err
+	}
+	time.Sleep(SubmitPause)
+	if f.unsubmitted(p, set, 0) {
+		return fmt.Errorf("pasted but not submitted; try fleet_send keys=[Enter]")
+	}
+	return nil
+}
+
+// unsubmitted polls the pane for up to wait and reports whether the pending
+// pattern is still on screen at the end.
+func (f *Fleet) unsubmitted(pane string, set status.Set, wait time.Duration) bool {
+	end := time.Now().Add(wait)
+	for {
+		text, err := f.T.Capture(pane, 0)
+		if err != nil {
+			return false
+		}
+		if _, ok := set.Unsubmitted(text); !ok {
+			return false
+		}
+		if time.Now().After(end) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// setOf is the status pattern set of an agent on the board.
+func (f *Fleet) setOf(name string) status.Set {
+	if a, ok := f.Store.Load().Agents[name]; ok {
+		return f.Patterns[a.Patterns]
+	}
+	return status.Set{}
 }
 
 // Peek returns raw pane text (last n lines).
@@ -198,6 +371,12 @@ func (f *Fleet) Close(name string) error {
 		}
 	}
 	logx.For("fleet").Info("closed", "agent", name)
+	f.forgetMail(name)
+	if f.Teams != nil {
+		if err := f.Teams.DropAgent(name); err != nil {
+			logx.For("fleet").Warn("drop team membership", "agent", name, "err", err)
+		}
+	}
 	return f.Store.Update(func(b *board.Board) error {
 		if _, ok := b.Agents[name]; !ok {
 			return fmt.Errorf("no agent %q", name)

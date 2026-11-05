@@ -55,3 +55,120 @@ func TestWaitingFor(t *testing.T) {
 		}
 	}
 }
+
+func screen(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata/copilot", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestMenu(t *testing.T) {
+	cp := Load(t.TempDir())["copilot"]
+	m, ok := cp.Menu(screen(t, "waiting-approval.txt"))
+	if !ok || len(m.Options) != 3 || m.Selected != 1 || m.Question != "Do you want to run this command?" {
+		t.Fatalf("approval: %v %+v", ok, m)
+	}
+	if m.Options[1] != "2. Yes, and don't ask again for `make` commands in this session" || Label(m.Options[2]) != "No, and tell Copilot what to do differently (Esc to stop)" {
+		t.Errorf("options: %q", m.Options)
+	}
+	m, ok = cp.Menu(screen(t, "waiting-dirs.txt"))
+	if !ok || len(m.Options) != 3 || m.Selected != 2 || m.Question != "Do you want to allow this?" || m.Options[1] != "2. Yes, and add these directories to the allowed list" {
+		t.Fatalf("dirs: %v %+v", ok, m)
+	}
+	for _, f := range []string{"idle.txt", "working.txt", "waiting-pasted.txt"} {
+		if m, ok := cp.Menu(screen(t, f)); ok {
+			t.Errorf("%s: unexpected menu %+v", f, m)
+		}
+	}
+	// A numbered list in the transcript (scrollbar ┃) or without a cursor is no prompt.
+	if _, ok := cp.Menu("  1. first step   ┃\n  2. second   ┃\n ❯ \n"); ok {
+		t.Error("transcript list taken for a menu")
+	}
+	if _, ok := ParseMenu("1. a\n2. b\n"); ok {
+		t.Error("list without cursor taken for a menu")
+	}
+	if got := Cut("abcdef", 4); got != "abc…" {
+		t.Errorf("cut %q", got)
+	}
+}
+
+func TestPending(t *testing.T) {
+	cp := Load(t.TempDir())["copilot"]
+	st, line, _ := cp.Match(screen(t, "waiting-pasted.txt"))
+	if st != Waiting || line != "unsubmitted input: [Paste #1 - 13 lines]" {
+		t.Errorf("got %s %q", st, line)
+	}
+	if _, ok := cp.Unsubmitted(screen(t, "idle.txt")); ok {
+		t.Error("idle has no pending input")
+	}
+	// The chip quoted in an agent's reply (transcript not scrolled, so no
+	// scrollbar) is not the input box.
+	quoted := strings.Replace(screen(t, "idle.txt"), "\n ~/git/fleet", "\n ● The box shows [Paste #1 - 13 lines] until Enter.\n ~/git/fleet", 1)
+	if !strings.Contains(strings.Join(Tail(quoted, Window), "\n"), "[Paste #1") {
+		t.Fatal("quoted line not in the window")
+	}
+	if st, line, _ := cp.Match(quoted); st == Waiting || strings.Contains(line, "unsubmitted") {
+		t.Errorf("quoted chip classified %s %q", st, line)
+	}
+	if _, ok := cp.Unsubmitted(quoted); ok {
+		t.Error("quoted chip taken for pending input")
+	}
+}
+
+func TestCleanScreen(t *testing.T) {
+	for _, f := range []string{"waiting-pasted.txt", "waiting-approval.txt", "waiting-dirs.txt", "working.txt"} {
+		raw := screen(t, f)
+		got := CleanScreen(raw)
+		if len(got) >= len(raw) {
+			t.Errorf("%s: nothing removed", f)
+		}
+		prevBlank := false
+		for _, l := range strings.Split(got, "\n") {
+			if l != strings.TrimRight(l, " ") {
+				t.Errorf("%s: trailing spaces %q", f, l)
+			}
+			if l != "" && strings.Trim(l, boxChars+" ") == "" {
+				t.Errorf("%s: chrome line %q", f, l)
+			}
+			if l == "" && prevBlank {
+				t.Errorf("%s: double blank line", f)
+			}
+			prevBlank = l == ""
+			if strings.HasSuffix(l, "┃") || strings.HasSuffix(l, "│") || strings.HasPrefix(l, "│") {
+				t.Errorf("%s: border left %q", f, l)
+			}
+		}
+		if f == "waiting-approval.txt" && !strings.Contains(got, "\n❯ 1. Yes\n") {
+			t.Errorf("approval options lost:\n%s", got)
+		}
+		if f == "waiting-pasted.txt" && !strings.Contains(got, "\n[Paste #1 - 13 lines]\n") {
+			t.Errorf("paste chip lost:\n%s", got)
+		}
+	}
+}
+
+func TestLastMessage(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "events.jsonl")
+	os.WriteFile(p, []byte(`{"type":"assistant.message","data":{"content":"first"}}
+{"type":"assistant.message","data":{"content":"main answer","toolRequests":[]}}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"name":"bash"}]}}
+{"type":"assistant.message","data":{"content":"sub","agentId":"a1"}}
+{"type":"assistant.message","data":{"content":"sub2","parentToolCallId":"toolu_1"}}
+{"type":"tool.execution_start","data":{"toolName":"bash"}}
+`), 0o644)
+	if got, ok, err := LastMessage(p); err != nil || !ok || got != "main answer" {
+		t.Errorf("got %q %v %v", got, ok, err)
+	}
+	old := LastMessageTail
+	LastMessageTail = 120 // only the tail: the main answers are cut off
+	defer func() { LastMessageTail = old }()
+	if got, ok, _ := LastMessage(p); ok {
+		t.Errorf("tail read found %q", got)
+	}
+	if _, _, err := LastMessage(p + ".missing"); err == nil {
+		t.Error("missing file: want error")
+	}
+}

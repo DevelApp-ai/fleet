@@ -12,6 +12,8 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/sturlabragason/fleet/internal/board"
+	"github.com/sturlabragason/fleet/internal/layout"
+	"github.com/sturlabragason/fleet/internal/team"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
@@ -23,6 +25,9 @@ type fakeBE struct {
 	ctx           [2]string
 	ctxSets       [][2]string
 	resets        int
+	picks         int
+	changes       int
+	teams         map[string]team.Info
 }
 
 func (f *fakeBE) Refresh() ([]*board.Agent, error) {
@@ -35,7 +40,8 @@ func (f *fakeBE) Refresh() ([]*board.Agent, error) {
 		{Name: "echo", Profile: "fake", Status: "idle", StatusSince: t0},
 	}, nil
 }
-func (f *fakeBE) OnWall() map[string]bool { return map[string]bool{"alpha": true} }
+func (f *fakeBE) OnWall() map[string]bool     { return map[string]bool{"alpha": true} }
+func (f *fakeBE) Teams() map[string]team.Info { return f.teams }
 func (f *fakeBE) Show(n string) (bool, error) {
 	f.shown = append(f.shown, n)
 	return !f.refuse, nil
@@ -50,6 +56,11 @@ func (f *fakeBE) SetSupCtx(l, c string) error {
 	return nil
 }
 func (f *fakeBE) ResetSup() error { f.resets++; return nil }
+func (f *fakeBE) Changes() error  { f.changes++; return nil }
+func (f *fakeBE) PickProfile() error {
+	f.picks++
+	return nil
+}
 
 func TestOrderAndKeys(t *testing.T) {
 	zone.NewGlobal()
@@ -104,8 +115,8 @@ func TestMouseClickSelectsAndShows(t *testing.T) {
 	m.setAgents(as)
 	m.View()
 	time.Sleep(50 * time.Millisecond) // zones register asynchronously
-	// second tile (bravo) spans columns 26..51, rows 1..6
-	_, cmd := m.Update(tea.MouseMsg{X: 30, Y: 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	// 5 cards wrap 3+2 at 43 columns: the second (bravo) spans columns 43..85, rows 1..6
+	_, cmd := m.Update(tea.MouseMsg{X: 50, Y: 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
 	if m.sel != "bravo" || cmd == nil {
 		t.Fatalf("sel=%s cmd=%v", m.sel, cmd)
 	}
@@ -168,7 +179,7 @@ func TestHelpOverlay(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
 	as, _ := (&fakeBE{}).Refresh()
 	m.setAgents(as)
-	if v := m.View(); !strings.Contains(v, "←↑↓→ select · ⏎ show on wall · x take off wall · Tab next waiting · ? all keys") {
+	if v := m.View(); !strings.Contains(v, "←↑↓→ select · ⏎ show on wall · x take off wall · Tab next waiting · g what's new · ? all keys") {
 		t.Errorf("header hint:\n%s", v)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -181,13 +192,13 @@ func TestHelpOverlay(t *testing.T) {
 	}
 	press("?")
 	v := m.View()
-	if !strings.Contains(v, "hide this pane (the agent keeps running)") || strings.Contains(v, "╭") {
+	if !strings.Contains(v, "hide this pane (the agent keeps") || strings.Contains(v, "╭") {
 		t.Fatalf("overlay should replace tiles:\n%s", v)
 	}
 	if cmd := press("q"); cmd != nil {
 		t.Fatal("q with the overlay open must not quit")
 	}
-	if m.help || strings.Contains(m.View(), "hide this pane (the agent keeps running)") {
+	if m.help || strings.Contains(m.View(), "hide this pane (the agent keeps") {
 		t.Fatal("q should close the overlay")
 	}
 	press("?")
@@ -218,7 +229,7 @@ func TestHelpOverlayShortPane(t *testing.T) {
 		t.Errorf("view is %d lines, pane is 14", len(lines))
 	}
 	// columns are half width, so the Alt-z description may wrap after "again to"
-	for _, want := range []string{"Panes", "Supervisor", "Alt-z         zoom this pane; press again", "Alt-m         wall: one main pane"} {
+	for _, want := range []string{"Panes", "Admiral", "Alt-z         zoom this pane; press again", "Alt-m         wall: one main pane"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("missing %q:\n%s", want, v)
 		}
@@ -272,5 +283,94 @@ func TestResetKey(t *testing.T) {
 	cmd()
 	if be.resets != 1 || m.msg != "" {
 		t.Errorf("resets=%d msg=%q", be.resets, m.msg)
+	}
+}
+
+func TestChangesKey(t *testing.T) {
+	be := &fakeBE{noWall: true}
+	m := New(be, "")
+	if cmd := m.key("g"); cmd != nil || m.msg != "g needs fleet up" {
+		t.Fatalf("no wall: msg=%q", m.msg)
+	}
+	be.noWall = false
+	m.msg = ""
+	cmd := m.key("g")
+	if cmd == nil {
+		t.Fatal("g must open the what's new popup")
+	}
+	cmd()
+	if be.changes != 1 || m.msg != "" {
+		t.Errorf("changes=%d msg=%q", be.changes, m.msg)
+	}
+}
+
+func TestTileShowsReportUnlessWorking(t *testing.T) {
+	a := &board.Agent{Name: "x", Status: "idle", LastLine: "screen line", Report: &board.Report{State: "done", Summary: "merged feat/x"}}
+	if got := ansi.Strip(line3(a, 40)); got != "✓ done: merged feat/x" {
+		t.Fatalf("idle with report: %q", got)
+	}
+	a.Report.State, a.Status = "blocked", "waiting"
+	if got := ansi.Strip(line3(a, 40)); got != "✗ blocked: merged feat/x" {
+		t.Fatalf("waiting with report: %q", got)
+	}
+	a.Status = "working"
+	if got := ansi.Strip(line3(a, 40)); got != "screen line" {
+		t.Fatalf("working: %q", got)
+	}
+	a.Report, a.Status = nil, "idle"
+	if got := ansi.Strip(line3(a, 40)); got != "screen line" {
+		t.Fatalf("no report: %q", got)
+	}
+}
+
+func TestTeamMark(t *testing.T) {
+	zone.NewGlobal()
+	now := time.Now()
+	render := func(teams map[string]team.Info, a *board.Agent) (tile, chip string) {
+		m := New(&fakeBE{}, "")
+		m.now = func() time.Time { return now }
+		m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+		m.teams = teams
+		m.onWall = map[string]bool{a.Name: true}
+		return m.tile(a, m.cfg.TileW), m.chips([]*board.Agent{a}, true)
+	}
+	a := &board.Agent{Name: "a-rather-long-agent-name", Profile: "copilot", Status: "idle", StatusSince: now.Add(-3 * time.Minute)}
+	tile, chip := render(map[string]team.Info{a.Name: {Team: "frontend-squad", Color: "#89b4fa"}}, a)
+	plainTile := ansi.Strip(tile)
+	for _, want := range []string{"◆ ▣", "○ a-rather-long… ◆ ▣", "frontend-… · idle 3m"} {
+		if !strings.Contains(plainTile, want) {
+			t.Errorf("tile missing %q:\n%s", want, plainTile)
+		}
+	}
+	if !strings.Contains(ansi.Strip(chip), "○ a-rather-long-agent-name ◆") {
+		t.Errorf("chip %q", ansi.Strip(chip))
+	}
+	// Line 1 never wraps: the tile keeps its height.
+	if got := strings.Count(tile, "\n"); got != layout.Default.TileH-1 {
+		t.Errorf("tile has %d lines:\n%s", got+1, plainTile)
+	}
+	// No team: identical to an empty teams map (and to nil).
+	t1, c1 := render(nil, a)
+	t2, c2 := render(map[string]team.Info{"other": {Team: "x", Color: "#f5c2e7"}}, a)
+	if t1 != t2 || c1 != c2 || strings.Contains(t1, "◆") || strings.Contains(c1, "◆") {
+		t.Error("an agent without a team must render as before")
+	}
+}
+
+func TestPickProfileKey(t *testing.T) {
+	be := &fakeBE{noWall: true}
+	m := New(be, "")
+	if cmd := m.key("P"); cmd != nil || m.msg != "P needs fleet up" {
+		t.Fatalf("no wall: msg=%q", m.msg)
+	}
+	be.noWall = false
+	m.msg = ""
+	cmd := m.key("P")
+	if cmd == nil {
+		t.Fatal("P must open the profile picker")
+	}
+	cmd()
+	if be.picks != 1 || m.msg != "" {
+		t.Errorf("picks=%d msg=%q", be.picks, m.msg)
 	}
 }

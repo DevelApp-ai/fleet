@@ -19,12 +19,13 @@ type Group string
 const (
 	Panes      Group = "Panes"
 	Wall       Group = "Wall"
-	Supervisor Group = "Supervisor"
+	Review     Group = "Review"
+	Supervisor Group = "Admiral"
 	Overview   Group = "Overview"
 )
 
 // Groups lists the groups in display order.
-var Groups = []Group{Panes, Wall, Supervisor, Overview}
+var Groups = []Group{Panes, Wall, Review, Supervisor, Overview}
 
 // Scope is where a short hint line is shown.
 type Scope int
@@ -62,11 +63,17 @@ var Bindings = []Binding{
 	{Group: Wall, Key: "Alt-m", Tmux: []string{"M-m"},
 		Desc: "wall: one main pane + stack"},
 	{Group: Supervisor, Key: "Alt-s", Tmux: []string{"M-s"},
-		Desc: "show/hide the supervisor", Hints: map[Scope]string{ScopeTmux: "Alt-s supervisor"}},
+		Desc: "show/hide the admiral", Hints: map[Scope]string{ScopeTmux: "Alt-s admiral"}},
 	{Group: Supervisor, Key: "Alt-S", Tmux: []string{"M-S"},
-		Desc: "move the supervisor left/right"},
+		Desc: "move the admiral left/right"},
 	{Group: Supervisor, Key: "Alt-R", Tmux: []string{"M-R"},
-		Desc: "reset the supervisor to a fresh chat (asks y/n)"},
+		Desc: "reset the admiral to a fresh chat (asks y/n)"},
+	{Group: Supervisor, Key: "Alt-P", Tmux: []string{"M-P"},
+		Desc: "pick the admiral's profile (copilot, claude, …)"},
+	// After the Admiral rows so its hint comes after "Alt-s admiral"
+	// (the first hint item dropped when the status line is narrow).
+	{Group: Review, Key: "Alt-g", Tmux: []string{ChangesTmuxKey},
+		Desc: "what's new in fleet: its latest features, unseen ones marked", Hints: map[Scope]string{ScopeTmux: ChangesHint}},
 	{Group: Overview, Key: "Alt-c", Tmux: []string{"M-c"},
 		Desc: "overview: tiles ↔ compact chips"},
 	{Group: Overview, Key: "←↑↓→ / hjkl",
@@ -77,13 +84,24 @@ var Bindings = []Binding{
 		Desc: "take the selected agent off the wall", Hints: map[Scope]string{ScopeOverview: "x take off wall"}},
 	{Group: Overview, Key: "Tab",
 		Desc: "jump to the next waiting agent", Hints: map[Scope]string{ScopeOverview: "Tab next waiting"}},
+	{Group: Overview, Key: "g",
+		Desc: "same as Alt-g: what's new in fleet", Hints: map[Scope]string{ScopeOverview: "g what's new"}},
 	{Group: Overview, Key: "1/2/4/6/9/m",
 		Desc: "same as Alt-1…9 / Alt-m"},
 	{Group: Overview, Key: "R",
-		Desc: "same as Alt-R: reset the supervisor (asks y/n)"},
+		Desc: "same as Alt-R: reset the admiral (asks y/n)"},
+	{Group: Overview, Key: "P",
+		Desc: "same as Alt-P: pick the admiral's profile"},
 	{Group: Overview, Key: "q",
 		Desc: "quit the overview"},
 }
+
+// ChangesTmuxKey opens the what's new popup; ChangesHint is its status
+// line item, which fleet up makes clickable.
+const (
+	ChangesTmuxKey = "M-g"
+	ChangesHint    = "Alt-g what's new"
+)
 
 // ChordTable is the tmux key table Alt-w switches to for the wall chord.
 const ChordTable = "fleetwall"
@@ -180,8 +198,8 @@ func HelpStyled(width int) string {
 	return help(width, r(head), r(key), r(desc))
 }
 
-// HelpColumns is HelpStyled laid out in two columns side by side (Panes and
-// Wall | Supervisor and Overview) with the footer below, for places too short
+// HelpColumns is HelpStyled laid out in two columns side by side (Panes,
+// Wall and Review | Admiral and Overview) with the footer below, for places too short
 // for the single list. width is the total width; each column wraps to half.
 func HelpColumns(width int) string {
 	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.Mauve))
@@ -190,8 +208,8 @@ func HelpColumns(width int) string {
 	r := func(st lipgloss.Style) func(string) string { return func(s string) string { return st.Render(s) } }
 	const gap = 2
 	cw := max(minCol, (width-gap)/2)
-	left := groupLines(Groups[:2], cw, r(head), r(key), r(desc))
-	right := groupLines(Groups[2:], cw, r(head), r(key), r(desc))
+	left := groupLines(Groups[:3], cw, r(head), r(key), r(desc))
+	right := groupLines(Groups[3:], cw, r(head), r(key), r(desc))
 	var lines []string
 	for i := 0; i < max(len(left), len(right)); i++ {
 		l, rt := "", ""

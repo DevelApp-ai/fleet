@@ -52,3 +52,22 @@ func TestSpawnPasteCapture(t *testing.T) {
 		t.Fatalf("join: %+v", ps)
 	}
 }
+
+func TestListPanesDeadStatus(t *testing.T) {
+	c := testClient(t)
+	p, err := c.Spawn("s", "w", "", nil, "sleep 0.2; exit 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetPaneOption(p, "remain-on-exit", "on")
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		ps, _ := c.ListPanes("")
+		if len(ps) == 1 && ps[0].Dead {
+			if ps[0].DeadStatus != "3" || ps[0].DeadSignal != "" {
+				t.Fatalf("dead fields: %+v", ps[0])
+			}
+			return
+		}
+	}
+	t.Fatal("pane never died")
+}

@@ -9,7 +9,7 @@
 ## Behaviour
 - CLI: `fleet <cmd> ...` → <what happens, output>
 - TUI/keys: <if any>
-- MCP: <tool name + args, if the supervisor should use it>
+- MCP: <tool name + args, if the admiral should use it>
 - Errors: <what the user sees when it fails>
 
 ## Where

@@ -10,8 +10,8 @@ import (
 
 func TestHintExact(t *testing.T) {
 	cases := map[Scope]string{
-		ScopeTmux:     "Alt-←↑↓→ switch pane · Alt-z zoom · Alt-x hide · Alt-s supervisor · Alt-? all keys",
-		ScopeOverview: "←↑↓→ select · ⏎ show on wall · x take off wall · Tab next waiting · ? all keys",
+		ScopeTmux:     "Alt-←↑↓→ switch pane · Alt-z zoom · Alt-x hide · Alt-s admiral · Alt-g what's new · Alt-? all keys",
+		ScopeOverview: "←↑↓→ select · ⏎ show on wall · x take off wall · Tab next waiting · g what's new · ? all keys",
 	}
 	for sc, want := range cases {
 		if got := Hint(sc, 200); got != want {
@@ -55,7 +55,7 @@ func TestHelpGroupsAndRows(t *testing.T) {
 				}
 			}
 		}
-		if got := strings.Join(heads, ","); got != "Panes,Wall,Supervisor,Overview" {
+		if got := strings.Join(heads, ","); got != "Panes,Wall,Review,Admiral,Overview" {
 			t.Errorf("width %d: groups %s", w, got)
 		}
 		flat := strings.Join(strings.Fields(h), " ")
@@ -85,7 +85,7 @@ func TestHelpGroupsAndRows(t *testing.T) {
 
 func TestTmuxKeys(t *testing.T) {
 	k := TmuxKeys()
-	for _, want := range []string{"M-?", "M-Left", "M-z", "M-x", "M-o", "M-1", "M-9", "M-m", "M-s", "M-S", "M-c", "M-w"} {
+	for _, want := range []string{"M-?", "M-Left", "M-z", "M-x", "M-o", "M-1", "M-9", "M-m", "M-s", "M-S", "M-c", "M-w", "M-g"} {
 		if !k[want] {
 			t.Errorf("missing %s", want)
 		}
@@ -134,7 +134,7 @@ func TestChordRowFirstInWall(t *testing.T) {
 func TestHelpColumns(t *testing.T) {
 	h := ansi.Strip(HelpColumns(120))
 	lines := strings.Split(h, "\n")
-	if !strings.HasPrefix(lines[0], "Panes") || !strings.Contains(lines[0], "Supervisor") {
+	if !strings.HasPrefix(lines[0], "Panes") || !strings.Contains(lines[0], "Admiral") {
 		t.Errorf("first line should head both columns: %q", lines[0])
 	}
 	if lines[len(lines)-1] != Footer {

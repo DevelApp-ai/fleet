@@ -3,11 +3,13 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/sessions"
+	"github.com/sturlabragason/fleet/internal/status"
 	"github.com/sturlabragason/fleet/internal/supervisor"
 	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/wall"
@@ -29,16 +31,28 @@ func obj(required []string, props map[string]any) map[string]any {
 
 func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 
+func strList(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
+}
+
 var confirmedProp = map[string]any{"type": "boolean", "description": "true only after the user explicitly said yes in chat"}
 
 var toolDefs = []tool{
-	{"fleet_status", "List all agents: name, profile, status, on_wall, what it waits for, age. Start here.", obj(nil, map[string]any{})},
-	{"fleet_peek", "Show the last N lines (default 20, max 80) of one agent's screen.", obj([]string{"name"}, map[string]any{
-		"name": str("agent name"), "lines": map[string]any{"type": "integer", "description": "lines to return (default 20, max 80)"}})},
-	{"fleet_send", "Send an ordinary prompt or follow-up text to an agent (presses Enter).", obj([]string{"name", "text"}, map[string]any{
-		"name": str("agent name"), "text": str("text to send")})},
-	{"fleet_answer", "Answer an agent's y/n approval prompt. Ask the user first; set confirmed=true only after an explicit yes.", obj([]string{"name", "answer", "confirmed"}, map[string]any{
-		"name": str("agent name"), "answer": map[string]any{"type": "string", "enum": []string{"y", "n"}}, "confirmed": confirmedProp})},
+	{"fleet_status", "List all agents: name, team, profile, status, running subagents, on_wall, what it waits for, age. Start here.", obj(nil, map[string]any{})},
+	{"fleet_peek", "Show the last N lines (default 20, max 80) of one agent's screen, without box borders and blank runs (raw=true: as captured). last_message=true returns the agent's last reply from its session log instead.", obj([]string{"name"}, map[string]any{
+		"name": str("agent name"), "lines": map[string]any{"type": "integer", "description": "lines to return (default 20, max 80)"},
+		"raw":          map[string]any{"type": "boolean", "description": "screen as captured, with borders"},
+		"last_message": map[string]any{"type": "boolean", "description": "the agent's last reply (Copilot profiles), at most 4000 chars"}})},
+	{"fleet_send", "Send an ordinary prompt or follow-up text (pastes, presses Enter, re-presses it if the paste stays unsubmitted). Target exactly one of name, names or team; several targets get one line each. keys presses allowed keys instead of Enter (text+keys: paste, no Enter, then keys); text or keys to an agent on a prompt need confirmed=true (Enter would answer it).", obj(nil, map[string]any{
+		"name": str("agent name"), "names": strList("several agent names"), "team": str("send to every member of this team"),
+		"text": str("text to send"), "keys": strList("key names: Enter, Escape, Up, Down, Left, Right, Tab, BTab, Space, BSpace, 1-9, y, n"),
+		"confirmed": map[string]any{"type": "boolean", "description": "only when an agent is waiting on a prompt (text or keys would answer it), after the user said yes"}})},
+	{"fleet_answer", "Answer an agent's prompt: answer y/n, or option N of a numbered menu (fleet_status lists the options). Ask the user first; set confirmed=true only after an explicit yes, and pass expect = the question the user confirmed.", obj([]string{"name", "confirmed"}, map[string]any{
+		"name": str("agent name"), "answer": map[string]any{"type": "string", "enum": []string{"y", "n"}, "description": "y = option 1, n = the first option starting with No; plain y/n when there is no menu"},
+		"option": map[string]any{"type": "integer", "minimum": 1, "maximum": 9, "description": "menu option number; pass answer or option, not both"},
+		"expect": str("the question the user confirmed (or part of it, or of the option label); refused if the prompt on screen no longer matches"), "confirmed": confirmedProp})},
+	{"fleet_info", "Facts about one agent: profile, team, status and age, last activity, dir, git (worktree, branch, dirty files, merged into main, commits ahead), session id, context %, mode.", obj([]string{"name"}, map[string]any{
+		"name": str("agent name")})},
 	{"fleet_spawn", "Start a new agent with a tool profile in a directory, optionally with a first prompt.", obj([]string{"name", "profile", "dir"}, map[string]any{
 		"name": str("short unique agent name"), "profile": str("tool profile, see fleet_profiles"), "dir": str("working directory (absolute)"), "prompt": str("optional first prompt")})},
 	{"fleet_sessions", "Find copilot/claude sessions the user started outside fleet, newest first: id | age | profile | dir | title | flags. Use before fleet_adopt.", obj(nil, map[string]any{
@@ -47,22 +61,38 @@ var toolDefs = []tool{
 		"session_id": str("session id from fleet_sessions"), "query": str("words matching exactly one session"), "profile": str("optional tool profile; default the suggested one"),
 		"dir": str("optional working directory (absolute); default from the session"), "name": str("optional agent name; default base name of dir")})},
 	{"fleet_profiles", "List tool profiles that fleet_spawn accepts.", obj(nil, map[string]any{})},
-	{"fleet_close", "Stop an agent and remove it from the board. Ask the user first; set confirmed=true only after an explicit yes.", obj([]string{"name", "confirmed"}, map[string]any{
+	{"fleet_close", "Stop an agent and remove it from the board. Ask the user first; set confirmed=true only after an explicit yes. The reply notes uncommitted or unmerged work in its dir.", obj([]string{"name", "confirmed"}, map[string]any{
 		"name": str("agent name"), "confirmed": confirmedProp})},
 	{"fleet_wall", "Change the live wall: show or hide an agent pane, or set the layout preset (1,2,4,6,9,m).", obj([]string{"action"}, map[string]any{
 		"action": map[string]any{"type": "string", "enum": []string{"show", "hide", "preset"}}, "name": str("agent name for show/hide"), "preset": str("1, 2, 4, 6, 9 or m")})},
-	{"fleet_note", "Save one line to the decisions log: a user decision, preference or promise. Survives a supervisor reset.", obj([]string{"text"}, map[string]any{
+	{"fleet_team", "Teams: named, coloured groups of agents (one team per agent). list; create (team, optional color); delete; add/remove (team, agents; add moves agents from another team and creates the team if missing); color (team, color); send (team, text) to every running member (members on a prompt are skipped unless confirmed=true); show/hide (team) on the wall; close (team) every member - ask the user first, confirmed=true only after an explicit yes.", obj([]string{"action"}, map[string]any{
+		"action": map[string]any{"type": "string", "enum": []string{"list", "create", "delete", "add", "remove", "color", "send", "show", "hide", "close"}},
+		"team":   str("team name"), "agents": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "agent names for add/remove"},
+		"color": str("palette name (blue, pink, teal, mauve, sky, sapphire) or #rrggbb"), "text": str("text for send"), "confirmed": confirmedProp})},
+	{"fleet_note", "Save one line to the decisions log: a user decision, preference or promise, or a RAID entry starting risk:, assumption:, issue: or decision:. Survives an admiral reset.", obj([]string{"text"}, map[string]any{
 		"text": str("the note, one line"), "agent": str("optional agent the note is about")})},
 	{"fleet_brief", "Start-of-session brief: the last handoff, recent notes and the agent table. Call first in a fresh session.", obj(nil, map[string]any{})},
-	{"fleet_handoff", "Write a handoff and get replaced by a fresh supervisor in a few seconds. Include open questions, promises and plans in flight, not agent statuses.", obj([]string{"summary"}, map[string]any{
-		"summary": str("what the next supervisor must know")})},
+	{"fleet_access", "List agent-to-agent access: the agent_mail policy, then every explicit pair with its state (pending, granted, denied), who asked, who decided and why. limit=N adds the last N messages between agents.", obj(nil, map[string]any{
+		"limit": map[string]any{"type": "integer", "description": "also show the last N agent-to-agent messages"}})},
+	{"fleet_access_decide", "Grant, deny or revoke access between two agents. Ask the user first; set confirmed=true only after an explicit yes.", obj([]string{"a", "b", "action", "confirmed"}, map[string]any{
+		"a": str("agent name"), "b": str("agent name"), "action": map[string]any{"type": "string", "enum": []string{"grant", "deny", "revoke"}}, "confirmed": confirmedProp})},
+	reportsToolDef,
+	{"fleet_handoff", "Write a handoff and get replaced by a fresh admiral in a few seconds. Include open questions, promises and plans in flight, not agent statuses.", obj([]string{"summary"}, map[string]any{
+		"summary": str("what the next admiral must know")})},
+	{"fleet_admiral_profile", "Switch the admiral (you) to another tool profile, e.g. claude-personal; same profile = restart and resume this chat. Only when the user asks. You are replaced in a few seconds; pass a summary of open questions, promises and plans in flight.", obj([]string{"profile"}, map[string]any{
+		"profile": str("tool profile, see fleet_profiles"), "summary": str("optional handoff for the next admiral")})},
 }
 
 type args struct {
 	Name, Text, Answer, Profile, Dir, Prompt, Action, Preset, Agent, Summary, Query string
+	Expect                                                                          string
+	To, From, Reason, Decision, A, B, State                                         string
 	SessionID                                                                       string `json:"session_id"`
-	Lines, Limit                                                                    int
-	Confirmed                                                                       bool
+	Lines, Limit, Option                                                            int
+	Confirmed, All, Raw                                                             bool
+	LastMessage                                                                     bool `json:"last_message"`
+	Team, Color                                                                     string
+	Agents, Names, Keys                                                             []string
 }
 
 func (s *Server) call(name string, raw json.RawMessage) (string, error) {
@@ -80,43 +110,16 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 	}
 	switch name {
 	case "fleet_status":
-		return s.status()
+		st, err := s.status()
+		return s.admiralHeader() + "\n" + st, err
 	case "fleet_peek":
-		if err := need(a.Name, "name"); err != nil {
-			return "", err
-		}
-		n := a.Lines
-		if n <= 0 {
-			n = 20
-		}
-		if n > 80 {
-			n = 80
-		}
-		out, err := s.F.Peek(a.Name, 0)
-		if err != nil {
-			return "", err
-		}
-		lines := strings.Split(strings.TrimRight(out, "\n "), "\n")
-		if len(lines) > n {
-			lines = lines[len(lines)-n:]
-		}
-		return strings.Join(lines, "\n"), nil
+		return s.peek(a)
 	case "fleet_send":
-		if err := need(a.Name, "name"); err != nil {
-			return "", err
-		}
-		if err := need(a.Text, "text"); err != nil {
-			return "", err
-		}
-		return "sent to " + a.Name, s.F.Send(a.Name, a.Text)
+		return s.send(a)
 	case "fleet_answer":
-		if a.Answer != "y" && a.Answer != "n" {
-			return "", fmt.Errorf(`answer must be "y" or "n"`)
-		}
-		if !a.Confirmed {
-			return "", fmt.Errorf("not confirmed: ask the user, then call again with confirmed=true")
-		}
-		return "answered " + a.Answer + " to " + a.Name, s.F.Send(a.Name, a.Answer)
+		return s.answer(a)
+	case "fleet_info":
+		return s.info(a)
 	case "fleet_spawn":
 		for f, v := range map[string]string{"name": a.Name, "profile": a.Profile, "dir": a.Dir} {
 			if err := need(v, f); err != nil {
@@ -126,6 +129,10 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 		ag, err := s.F.Spawn(a.Name, a.Profile, a.Dir, a.Prompt)
 		if err != nil {
 			return "", err
+		}
+		if ag.Status == string(status.Queued) {
+			return fmt.Sprintf("queued %s (%s) in %s: %d agents busy, max_working %d; it starts when a slot frees while the overview TUI runs",
+				ag.Name, ag.Profile, ag.Dir, s.F.Busy(), s.F.Prefs.MaxWorking()), nil
 		}
 		return fmt.Sprintf("spawned %s (%s) in %s", ag.Name, ag.Profile, ag.Dir), nil
 	case "fleet_sessions":
@@ -165,18 +172,12 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 		var b strings.Builder
 		for _, n := range tools.Names(s.F.Profiles) {
 			p := s.F.Profiles[n]
-			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>"}, tools.Launch{})
+			argv, _ := p.Argv(tools.Vars{Fleet: "fleet", Name: "<name>", PeerMCP: "<peer-mcp>", PeerMCPClaude: "<peer-mcp>"}, tools.Launch{})
 			fmt.Fprintf(&b, "%s: %s\n", n, strings.Join(argv, " "))
 		}
 		return b.String(), nil
 	case "fleet_close":
-		if err := need(a.Name, "name"); err != nil {
-			return "", err
-		}
-		if !a.Confirmed {
-			return "", fmt.Errorf("not confirmed: ask the user, then call again with confirmed=true")
-		}
-		return "closed " + a.Name, s.F.Close(a.Name)
+		return s.close(a)
 	case "fleet_wall":
 		switch a.Action {
 		case "preset":
@@ -196,13 +197,37 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 			return a.Name + " off wall", s.W.Hide(p)
 		}
 		return "", fmt.Errorf("action must be show, hide or preset")
+	case "fleet_team":
+		return s.team(a)
 	case "fleet_note":
 		if err := need(strings.TrimSpace(a.Text), "text"); err != nil {
 			return "", err
 		}
 		return "noted", supervisor.AppendNote(s.F.Home, a.Agent, a.Text)
 	case "fleet_brief":
-		return s.brief()
+		br, err := s.brief()
+		return s.admiralHeader() + "\n" + br, err
+	case "fleet_admiral_profile":
+		return s.admiralProfile(a.Profile, a.Summary)
+	case "fleet_reports":
+		return s.reports(a.All, a.Limit)
+	case "fleet_access":
+		out := PolicyLine(s.F.MailPolicy()) + "\n" + RenderPairs(s.F.Mail().All())
+		if a.Limit > 0 {
+			out = strings.TrimRight(out, "\n") + "\n\n" + RenderLog(s.F.Mail().Log(a.Limit))
+		}
+		return out, nil
+	case "fleet_access_decide":
+		if a.Action != "grant" && a.Action != "deny" && a.Action != "revoke" {
+			return "", fmt.Errorf("action must be grant, deny or revoke")
+		}
+		if !a.Confirmed {
+			return "", fmt.Errorf("not confirmed: ask the user, then call again with confirmed=true")
+		}
+		if err := s.F.AccessDecide(a.A, a.B, a.Action); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s: %s and %s", a.Action, a.A, a.B), nil
 	case "fleet_handoff":
 		if err := need(strings.TrimSpace(a.Summary), "summary"); err != nil {
 			return "", err
@@ -213,7 +238,7 @@ func (s *Server) call(name string, raw json.RawMessage) (string, error) {
 		if err := s.Reset(); err != nil {
 			return "", fmt.Errorf("handoff saved, but reset failed: %v", err)
 		}
-		return "handoff saved; a fresh supervisor takes over in a few seconds. Stop here.", nil
+		return "handoff saved; a fresh admiral takes over in a few seconds. Stop here.", nil
 	}
 	return "", fmt.Errorf("unknown tool %q", name)
 }
@@ -228,20 +253,22 @@ func (s *Server) status() (string, error) {
 	}
 	on := s.W.OnWall()
 	var b strings.Builder
-	b.WriteString("name | profile | status | wall | age | waiting_for\n")
+	teams := s.F.Teams.ByAgent()
+	b.WriteString("name | team | profile | status | subagents | wall | age | waiting_for | report\n")
 	for _, a := range as {
 		wf := ""
 		if a.Status == "waiting" || a.Status == "error" || a.Status == "stuck" {
-			wf = a.LastLine
-			if len(wf) > 70 {
-				wf = wf[:70] + "…"
-			}
+			wf = s.waitingFor(a)
 		}
 		w := ""
 		if on[a.Name] {
 			w = "yes"
 		}
-		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s\n", a.Name, a.Profile, a.Status, w, time.Since(a.StatusSince).Round(time.Second), wf)
+		sub := ""
+		if n := status.RunningCount(a.Subagents); n > 0 {
+			sub = strconv.Itoa(n)
+		}
+		fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n", a.Name, teams[a.Name].Team, a.Profile, a.Status, sub, w, time.Since(a.StatusSince).Round(time.Second), wf, reportCell(a.Report))
 	}
 	return b.String(), nil
 }
@@ -287,6 +314,7 @@ func (s *Server) brief() (string, error) {
 	} else {
 		b.WriteString("none\n\n")
 	}
+	b.WriteString(s.unreadReports())
 	st, err := s.status()
 	if err != nil {
 		return "", err

@@ -41,7 +41,7 @@ func evictClass(p tmux.PaneInfo) int {
 // wall pane -> overview -> Enter, so that slot is the one they meant to reuse
 // (DESIGN.md §5b.1). Status does not matter — an explicit Enter beats class-1
 // protection — but a pinned pane is never replaced, and there is nothing to
-// reuse when focus came from the supervisor or never left the overview.
+// reuse when focus came from the admiral or never left the overview.
 func ReplaceSlot(ps []tmux.PaneInfo) (string, bool) {
 	for _, p := range ps {
 		if p.Last && p.Role == "wall" && !p.Pin {

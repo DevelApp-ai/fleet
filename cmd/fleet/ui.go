@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
@@ -13,6 +14,8 @@ import (
 	"github.com/sturlabragason/fleet/internal/fleet"
 	"github.com/sturlabragason/fleet/internal/logx"
 	"github.com/sturlabragason/fleet/internal/supervisor"
+	"github.com/sturlabragason/fleet/internal/team"
+	"github.com/sturlabragason/fleet/internal/tools"
 	"github.com/sturlabragason/fleet/internal/ui"
 	"github.com/sturlabragason/fleet/internal/wall"
 )
@@ -22,6 +25,7 @@ type backend struct {
 	f       *fleet.Fleet
 	w       *wall.Wall
 	enabled bool
+	supProf string // last @fleet_admiral_profile set on the admiral border
 }
 
 func (b *backend) Refresh() ([]*board.Agent, error) { return b.f.Refresh() }
@@ -44,6 +48,7 @@ func (b *backend) OnWall() map[string]bool {
 	}
 	return b.w.OnWall()
 }
+func (b *backend) Teams() map[string]team.Info { return b.f.Teams.ByAgent() }
 func (b *backend) Show(name string) (bool, error) {
 	p, err := b.f.Pane(name)
 	if err != nil {
@@ -69,6 +74,7 @@ func (b *backend) SupCtx() (string, string) {
 	if !b.enabled {
 		return "", ""
 	}
+	b.syncAdmiralProfile()
 	used, max, ok := supervisor.CurrentFill(b.f.Home, b.f.T, mainTarget())
 	if !ok {
 		return "", ""
@@ -83,7 +89,7 @@ func (b *backend) SetSupCtx(label, color string) error {
 	}
 	pane, err := supervisor.FindPane(b.f.T, mainTarget())
 	if err != nil {
-		return nil // no supervisor, nothing to colour
+		return nil // no admiral, nothing to colour
 	}
 	if label == "" {
 		b.f.T.Run("set-option", "-p", "-u", "-t", pane, "@fleet_ctx")
@@ -99,6 +105,34 @@ func (b *backend) ResetSup() error {
 	return err
 }
 
+// PickProfile opens the admiral profile picker popup (the overview's P).
+func (b *backend) PickProfile() error {
+	_, err := b.f.T.Run(pickPopupArgs(b.f)...)
+	return err
+}
+
+// syncAdmiralProfile keeps the admiral border's profile in step with
+// session.json; tmux is only touched when the profile changed.
+func (b *backend) syncAdmiralProfile() {
+	s, ok := supervisor.Load(b.f.Home)
+	if !ok || s.Profile == "" || s.Profile == b.supProf {
+		return
+	}
+	pane, err := supervisor.FindPane(b.f.T, mainTarget())
+	if err != nil {
+		return
+	}
+	if b.f.T.SetPaneOption(pane, "@fleet_admiral_profile", s.Profile) == nil {
+		b.supProf = s.Profile
+	}
+}
+
+// Changes opens the what's new popup (DESIGN.md §5d) on the fleet client (the overview's g).
+func (b *backend) Changes() error {
+	_, err := b.f.T.Run(changesPopupArgs(tools.Quote(b.f.Exe))...)
+	return err
+}
+
 // insideFleet reports whether this process runs in a pane of the fleet server.
 func insideFleet(f *fleet.Fleet) bool {
 	tm := os.Getenv("TMUX")
@@ -111,6 +145,10 @@ func insideFleet(f *fleet.Fleet) bool {
 
 func cmdUI(f *fleet.Fleet) error {
 	zone.NewGlobal()
+	// Off-wall panes are captured every 5 s instead of every poll (DESIGN §7a).
+	f.OffWallEvery = 5 * time.Second
+	// Only the overview TUI starts queued spawns when a slot frees (§7a).
+	f.DrainQueue = true
 	be := &backend{f: f, w: wall.New(f.T, fleet.Session), enabled: insideFleet(f)}
 	logx.For("ui").Info("start", "wall", be.enabled)
 	p := tea.NewProgram(ui.New(be, f.Home), tea.WithAltScreen(), tea.WithMouseCellMotion())

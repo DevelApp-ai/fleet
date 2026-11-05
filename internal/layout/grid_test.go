@@ -7,7 +7,7 @@ import (
 )
 
 // The reference wall rectangle: a 300x80 terminal is 300x79 after the tmux
-// status line (so Build gets H=79), minus the 90-column supervisor + border and the 14-row overview
+// status line (so Build gets H=79), minus the 90-column admiral + border and the 14-row overview
 // + border (DESIGN.md §5b.2).
 const refW, refH = 209, 64
 

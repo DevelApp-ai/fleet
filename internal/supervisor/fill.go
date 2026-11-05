@@ -13,7 +13,7 @@ import (
 )
 
 // SessionIDFromCommand finds `--session-id <id>` in a start command (fallback
-// for supervisors started before session.json existed).
+// for admirals started before session.json existed).
 func SessionIDFromCommand(cmd string) string {
 	f := strings.Fields(strings.NewReplacer("'", " ", `"`, " ").Replace(cmd))
 	for i, a := range f {
@@ -121,9 +121,14 @@ func Pct(used, max int) int {
 	return used * 100 / max
 }
 
-// Threshold is the handoff percent: $FLEET_SUP_HANDOFF_PCT or 70.
+// Threshold is the handoff percent: $FLEET_ADMIRAL_HANDOFF_PCT, else the
+// deprecated $FLEET_SUP_HANDOFF_PCT (ADR-26), else 70.
 func Threshold() int {
-	if v, err := strconv.Atoi(os.Getenv("FLEET_SUP_HANDOFF_PCT")); err == nil && v > 0 && v <= 100 {
+	env := os.Getenv("FLEET_ADMIRAL_HANDOFF_PCT")
+	if env == "" {
+		env = os.Getenv("FLEET_SUP_HANDOFF_PCT")
+	}
+	if v, err := strconv.Atoi(env); err == nil && v > 0 && v <= 100 {
 		return v
 	}
 	return 70

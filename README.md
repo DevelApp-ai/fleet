@@ -5,11 +5,11 @@
 
 # fleet
 
-See and steer many coding-agent sessions (Copilot CLI, Claude Code, agy, vibe) from one tmux window, with an LLM supervisor that can act on them for you.
+See and steer many coding-agent sessions (Copilot CLI, Claude Code, agy, vibe) from one tmux window, with an LLM admiral that can act on them for you.
 
-![fleet: supervisor on the left, overview tiles top right, a 2×2 wall of live agent panes below](docs/img/hero.png)
+![fleet: the admiral on the left, overview tiles top right, a 2×2 wall of live agent panes below](docs/img/hero.png)
 
-<sub>Screenshot made with fake agents (`scripts/screenshot.sh`); the supervisor pane here is also a fake agent. Animated version: [docs/img/demo.gif](docs/img/demo.gif).</sub>
+<sub>Screenshot made with fake agents (`scripts/screenshot.sh`); the admiral pane here is also a fake agent. Animated version: [docs/img/demo.gif](docs/img/demo.gif).</sub>
 
 ## Why
 
@@ -17,9 +17,9 @@ Running 20–40 agent sessions at once, the terminals aren't the problem. Attent
 
 - You can't tell which agents are working, stuck, waiting on you or done without visiting each terminal.
 - Every answer and approval has to come from you, typed into the right window.
-- A single "supervisor" agent that reads every raw pane fills its context and gets worse at its job.
+- A single overseer agent that reads every raw pane fills its context and gets worse at its job.
 
-Session switchers make moving between agents faster, but you still do all the supervising. fleet puts every agent in one tmux server, shows its status as a coloured tile, puts the agents you care about on a live wall of real panes, and gives a supervisor agent a small set of MCP tools to report on and act on the fleet. Risky actions need your confirmation. The full reasoning is in [DESIGN.md](DESIGN.md).
+Session switchers make moving between agents faster, but you still do all the supervising. fleet puts every agent in one tmux server, shows its status as a coloured tile, puts the agents you care about on a live wall of real panes, and gives one agent, the admiral, a small set of MCP tools to report on and act on the fleet. Risky actions need your confirmation. The full reasoning is in [DESIGN.md](DESIGN.md).
 
 ## What it does today
 
@@ -28,8 +28,11 @@ Session switchers make moving between agents faster, but you still do all the su
 - **Overview TUI**: coloured tiles sorted by attention (waiting agents first, longest wait first), arrow keys, mouse click, `Tab` through waiting agents.
 - **Live wall**: real, interactive tmux panes for the agents you are working with. Layouts 1, 2, 4, 6, 9 and main+stack, as caps rather than fixed shapes: the grid is sized to the window so panes stay readable, and the pane that needs attention gets the big slot. When the wall is full, the pane you were last in is replaced in place; otherwise an idle pane leaves before a working one, and waiting or failing panes stay. Processes never restart.
 - **Adopt**: `fleet sessions` lists Copilot and Claude sessions started outside fleet, and `fleet adopt` resumes one as an agent.
-- **Supervisor**: an agent (Copilot CLI by default) in the left pane with thirteen `fleet_*` MCP tools from `fleet mcp`.
-- **CLI** for scripting: `spawn`, `adopt`, `sessions`, `ls`, `send`, `peek`, `close`, `profiles`, `supervisor`, `note`, `keys`, `wall`.
+- **A queue**: with `max_working` set, a spawn past the limit waits and starts when a slot frees.
+- **Admiral**: an agent (Copilot CLI by default) in the left pane with nineteen `fleet_*` MCP tools from `fleet mcp`. It keeps a context meter, can hand off to a fresh session (`Alt+R`) and can swap its own tool profile (`Alt+P`).
+- **Teams**: group agents (`fleet team create frontend teal`), then send to, show or close a whole team at once. Members are marked with a coloured `◆`.
+- **Agent mail**: agents message each other with `fleet mail` or peer MCP tools. Free inside a team or a repo, otherwise one agent asks and you decide.
+- **CLI** for scripting: `spawn`, `adopt`, `sessions`, `ls`, `send`, `peek`, `close`, `team`, `mail`, `access`, `report`, `admiral`, `note`, `playbook`, `touching`, `profiles`, `keys`, `changes`, `wall`.
 - **Fake agents** that cycle through states, so you can try everything without spending tokens.
 
 Planned, not built yet: park/wake to save RAM, cheap-model summaries for `peek`, tool hooks instead of screen scraping, a spawn wizard and approve/reject keys in the TUI, notifications, worktree per agent. See [Roadmap](#roadmap).
@@ -54,14 +57,14 @@ make build      # bin/fleet and bin/fakeagent
 make install    # symlink bin/fleet to ~/.local/bin/fleet
 ```
 
-The supervisor runs in a directory holding its `.mcp.json`; its rules are built into `fleet mcp`. With `make build` that is `supervisor/` next to `bin/`, found automatically. With `go install`, copy `supervisor/` somewhere and set `FLEET_SUPERVISOR_DIR` to it. The supervisor's `.mcp.json` runs `fleet mcp`, so `fleet` must be on `PATH`.
+The admiral needs no setup: `fleet up` passes the MCP server (`fleet mcp`) to it on the command line, and its rules travel as the server's instructions. Its working directory is `supervisor/` next to the binary when you build from a checkout, your home directory otherwise; `FLEET_ADMIRAL_DIR` overrides it.
 
 ## Quickstart (fake agents, no tokens)
 
 ```sh
 make build
 export PATH=$PWD/bin:$PATH
-FLEET_SUPERVISOR_PROFILE=fake fleet up --no-attach   # fake supervisor too
+fleet up --admiral-profile fake --no-attach   # fake admiral too, no tokens
 for n in api-auth web-nav infra-dns docs; do fleet spawn --fake $n; done
 fleet ls
 tmux -L fleet attach -t fleet:main
@@ -69,7 +72,7 @@ tmux -L fleet attach -t fleet:main
 
 In the overview, select a tile and press `Enter` to put it on the wall. Click into a wall pane and type `y` to answer its prompt. `Alt+4` picks a 2×2 wall.
 
-Drop `FLEET_SUPERVISOR_PROFILE=fake` to get a real Copilot CLI supervisor. To stop everything: `tmux -L fleet kill-server`.
+Drop `--admiral-profile fake` to get a real Copilot CLI admiral. To stop everything: `tmux -L fleet kill-server`.
 
 ```text
 $ fleet ls
@@ -84,7 +87,7 @@ web-nav      fake     waiting  11s  %3    Approve? [y/n]
 
 ```mermaid
 flowchart LR
-  sup["supervisor<br/>copilot + fleet MCP tools"]
+  sup["admiral<br/>copilot + fleet MCP tools"]
   subgraph right[" "]
     direction TB
     ov["overview: tiles, then chips"]
@@ -98,7 +101,7 @@ flowchart LR
   sup --- right
 ```
 
-- **Supervisor** (left, 90 columns, 64 below 220 columns wide). `Alt+s` hides it, `Alt+S` moves it to the other side.
+- **Admiral** (left, 90 columns, 64 below 220 columns wide). `Alt+s` hides it, `Alt+S` moves it to the other side, `Alt+R` resets it, `Alt+P` swaps its profile.
 - **Overview** (top right, 14 rows). Tiles for as many agents as fit, one-line chips for the rest. `Alt+c` switches to chips only.
 - **Wall** (below). Live agent panes. Each pane border shows the agent's name and status in its status colour.
 - Agents not on the wall live in hidden windows `ag-<name>`.
@@ -107,7 +110,7 @@ All geometry is in [`internal/layout`](internal/layout/config.go).
 
 ## Keys
 
-**Press `Alt+?` anywhere in the fleet window for a popup with every key**, grouped by area (panes, wall, supervisor, overview). Any key closes it. In the overview, `?` shows the same list; `q`, `Esc` or `?` closes it. `fleet keys` prints it in a terminal. The status line at the bottom shows the most used keys in plain words.
+**Press `Alt+?` anywhere in the fleet window for a popup with every key**, grouped by area (panes, wall, admiral, overview). Any key closes it. In the overview, `?` shows the same list; `q`, `Esc` or `?` closes it. `fleet keys` prints it in a terminal. The status line at the bottom shows the most used keys in plain words.
 
 Overview (when the overview pane has focus):
 
@@ -118,6 +121,8 @@ Overview (when the overview pane has focus):
 | `Enter`, left click | Put the selected agent on the wall |
 | `x` | Take the selected agent off the wall |
 | `1` `2` `4` `6` `9` `m` | Wall layout |
+| `g` | What's new in fleet |
+| `R` / `P` | Reset the admiral / pick its profile |
 | `?` | Show all keys |
 | `q`, `Ctrl+C` | Quit the overview (`fleet up` restarts it) |
 
@@ -129,7 +134,9 @@ Anywhere in the fleet window (tmux bindings, no prefix; only on the `fleet` serv
 | `Alt+z` | Zoom the focused pane |
 | `Alt+x` | Take the focused wall pane off the wall |
 | `Alt+1` `2` `4` `6` `9` `m` | Wall layout |
-| `Alt+s` / `Alt+S` | Hide/show the supervisor / move it to the other side |
+| `Alt+s` / `Alt+S` | Hide/show the admiral / move it to the other side |
+| `Alt+R` / `Alt+P` | Reset the admiral to a fresh chat / pick its profile |
+| `Alt+g` | What's new in fleet |
 | `Alt+c` | Overview: tiles or chips only |
 | `Alt+o` | Jump to the marked pane |
 | `Alt+?` | Show all keys in a popup |
@@ -157,9 +164,9 @@ fleet spawn api-auth claude-work ~/src/api "add rate limiting to /login"
 
 Agents start through `bash -lc`, so shell aliases don't apply; make a profile instead. More in [docs/profiles.md](docs/profiles.md) and [examples/tools.toml](examples/tools.toml).
 
-## Supervisor and MCP tools
+## The admiral and its MCP tools
 
-`fleet up` starts the supervisor (profile `copilot` unless `FLEET_SUPERVISOR_PROFILE` says otherwise) in `supervisor/`. Its `.mcp.json` registers `fleet mcp`, a stdio MCP server with these tools:
+`fleet up` starts the admiral under the `copilot` profile unless you say otherwise (`--admiral-profile NAME`, `$FLEET_ADMIRAL_PROFILE`, an `[admiral]` entry in your config, or `Alt+P` while running). It talks to `fleet mcp`, a stdio MCP server, with these tools:
 
 | Tool | What it does |
 |---|---|
@@ -174,10 +181,16 @@ Agents start through `bash -lc`, so shell aliases don't apply; make a profile in
 | `fleet_sessions` | List Copilot/Claude sessions started outside fleet |
 | `fleet_adopt` | Resume one of those sessions as an agent |
 | `fleet_note` | Save a note to `~/.fleet/decisions.log` |
-| `fleet_brief` | Handoff + recent notes + status, for a fresh supervisor |
-| `fleet_handoff` | Write a handoff and restart the supervisor fresh |
+| `fleet_brief` | Handoff + recent notes + status, for a fresh admiral |
+| `fleet_handoff` | Write a handoff and restart the admiral fresh |
+| `fleet_team` | List, create or change teams; send, show, hide or close one |
+| `fleet_reports` | What agents reported (done, blocked, question, progress) |
+| `fleet_access` | Who may message whom |
+| `fleet_access_decide` | Grant, deny or revoke that. Needs `confirmed=true` |
+| `fleet_admiral_profile` | Show or swap the admiral's own tool profile |
+| `fleet_info` | Version, uptime, context fill |
 
-The supervisor must ask you before it answers a prompt or closes an agent. See [docs/supervisor.md](docs/supervisor.md).
+The admiral must ask you before it answers a prompt, closes an agent or changes who may message whom. See [docs/admiral.md](docs/admiral.md).
 
 ## Files and logs
 
@@ -188,6 +201,8 @@ The supervisor must ask you before it answers a prompt or closes an agent. See [
 | `~/.fleet/events.jsonl` | Status transitions |
 | `~/.fleet/tools.toml` | Your profiles |
 | `~/.fleet/patterns.toml` | Your status patterns |
+| `~/.fleet/decisions.log` | Notes the admiral kept for you |
+| `~/.fleet/worker.md` | Extra playbook text prepended to every spawn prompt (`fleet playbook`) |
 | `~/.config/fleet/config.toml` | Local preferences, never committed: starting mode (e.g. Copilot autopilot), extra tool args, prompt auto-submit. `$FLEET_CONFIG` overrides the path; see [`examples/config.toml.example`](examples/config.toml.example). |
 | `~/.fleet/logs/fleet.log` | Everything fleet does, one `component=` per line |
 
@@ -205,7 +220,7 @@ Tests that need tmux use throwaway `fleet-test-*` servers. Architecture: [docs/a
 
 ## Roadmap
 
-Built: slices 0–3 of [DESIGN.md §9](DESIGN.md#9-how-ill-build-and-iterate-quickly) (fake agents, status, overview, live wall), the supervisor's MCP server, supervisor handoff (context meter, notes, `Alt-R` reset), `fleet adopt`/`fleet sessions`, and a wall that sizes itself to the window. Planned:
+Built: slices 0–3 of [DESIGN.md §9](DESIGN.md#9-how-ill-build-and-iterate-quickly) (fake agents, status, overview, live wall), the admiral's MCP server, admiral handoff (context meter, notes, `Alt+R` reset, profile swap), `fleet adopt`/`fleet sessions`, teams, agent mail with access control, the worker playbook, and a wall that sizes itself to the window. Planned:
 
 - Peek overlay, send, approve/reject and spawn wizard in the TUI
 - Real-tool status patterns from captured screens; hooks for Claude Code and Copilot

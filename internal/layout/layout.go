@@ -17,7 +17,7 @@ type Node struct {
 // Input describes the window to lay out.
 type Input struct {
 	W, H   int
-	Sup    string   // supervisor pane id ("" if hidden/absent)
+	Sup    string   // admiral pane id ("" if hidden/absent)
 	Ov     string   // overview pane id
 	Wall   []string // wall pane ids in slot order
 	Preset string

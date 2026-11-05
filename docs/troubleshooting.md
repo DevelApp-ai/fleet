@@ -45,10 +45,10 @@ tmux -L fleet list-panes -a -F '#{pane_id} #{@role} #{@fleet_agent} #{pane_dead}
 
 **`Enter` in the overview says the wall needs `fleet up`.** The wall only works when the overview runs inside the fleet tmux server. Use `fleet up`, not `fleet ui` in a plain terminal.
 
-**The supervisor has no fleet tools.** `fleet` must be on `PATH` for `supervisor/.mcp.json` (`make install`). If you installed with `go install`, set `FLEET_SUPERVISOR_DIR` to a copy of `supervisor/`. Check the supervisor's directory in `fleet.log` (`component=up`).
+**The admiral has no fleet tools.** `fleet up` passes the MCP server to it on the command line, so check the admiral's argv in `fleet.log` (`component=up`). Tools only work under a `copilot` or `claude` profile; with any other profile (including `fake`) the admiral is an ordinary agent. `fleet admiral` shows the current profile and session.
 
 **The overview pane is gone or dead.** Run `fleet up` again. It recreates or respawns the overview pane and doesn't touch running agents.
 
 **An agent is listed as `gone`.** Its pane no longer exists (closed outside fleet, or the server was restarted). `fleet close <name>` removes it from the board.
 
-**Start over.** `tmux -L fleet kill-server` stops every agent and the supervisor. Then delete `~/.fleet/board.json` if you want an empty board.
+**Start over.** `tmux -L fleet kill-server` stops every agent and the admiral. Then delete `~/.fleet/board.json` if you want an empty board.

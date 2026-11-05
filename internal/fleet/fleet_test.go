@@ -71,7 +71,7 @@ patterns = "fake"
 // directly after the "> " marker, which only happens when the paste waited.
 func TestSpawnPromptWaitsForReady(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("FLEET_CONFIG", filepath.Join(home, "no-config.toml"))
+	noPlaybook(t, home)
 	tc := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
 	t.Cleanup(func() { tc.KillServer() })
 	// No prompt_args, and the input box appears only after 2.5s.
@@ -117,7 +117,7 @@ func TestSpawnFakeAgentEndToEnd(t *testing.T) {
 		t.Skip("bin/fleet not built; run make build")
 	}
 	home := t.TempDir()
-	t.Setenv("FLEET_CONFIG", filepath.Join(home, "no-config.toml"))
+	noPlaybook(t, home)
 	tc := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
 	t.Cleanup(func() { tc.KillServer() })
 	f, err := New(tc, home, exe)
@@ -197,4 +197,131 @@ patterns = "fake"
 	if got := paneStatus(); got != "error" {
 		t.Errorf("pane tag not re-synced: %q", got)
 	}
+}
+
+// Choose and Answer move the ❯ cursor with Up/Down from the selected item,
+// then press Enter; Send presses Enter again for a paste left unsubmitted.
+func TestChooseAndSubmit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLEET_CONFIG", filepath.Join(home, "no-config.toml"))
+	tc := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
+	t.Cleanup(func() { tc.KillServer() })
+	os.WriteFile(filepath.Join(home, "patterns.toml"), []byte("[pend]\npending = ['\\[Paste #\\d+']\nwaiting = ['\\[y/n\\]']\nidle = ['^> ']\n"), 0o644)
+	os.WriteFile(filepath.Join(home, "tools.toml"), []byte(`[menu]
+command = "sh"
+args = ["-c", "stty -echo; printf 'Do you want to?\n  1. Yes\n❯ 2. Yes, more\n  3. No, stop\n'; cat -v"]
+patterns = "fake"
+[swallow]
+command = "sh"
+args = ["-c", "stty -echo; printf '> '; read a; printf '[Paste #1 - 1 lines]\n'; read b; printf '\033[2J\033[Hsubmitted %s\n' \"$a\"; cat"]
+patterns = "pend"
+[asks]
+command = "sh"
+args = ["-c", "stty -echo; printf 'Approve? [y/n]\n[Paste #1 - 1 lines]\n'; while read l; do echo got; done"]
+patterns = "pend"
+[stuck]
+command = "sh"
+args = ["-c", "stty -echo; printf '[Paste #1 - 1 lines]\n'; cat >/dev/null"]
+patterns = "pend"
+`), 0o644)
+	f, err := New(tc, home, "/nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldP, oldW := SubmitPause, SubmitWait
+	SubmitPause, SubmitWait = 10*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { SubmitPause, SubmitWait = oldP, oldW })
+	for n, p := range map[string]string{"m": "menu", "s": "swallow", "x": "stuck", "q": "asks"} {
+		if _, err := f.Spawn(n, p, home, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor := func(name, want string) string {
+		var out string
+		for i := 0; i < 40; i++ {
+			if out, _ = f.Peek(name, 0); strings.Contains(out, want) {
+				return out
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("%s never showed %q: %q", name, want, out)
+		return ""
+	}
+	waitFor("m", "3. No, stop")
+	if _, err := f.Choose("m", 1, "run this command"); err == nil || err.Error() != "prompt changed: now 'Do you want to?'" {
+		t.Fatalf("expect mismatch: %v", err)
+	}
+	if c, err := f.Choose("m", 1, "do YOU want"); err != nil || c.Label != "1. Yes" || c.Question != "Do you want to?" {
+		t.Fatalf("choose: %+v %v", c, err)
+	}
+	out := strings.ReplaceAll(waitFor("m", "^["), "^[O", "^[[") // either cursor key mode
+	if !strings.HasSuffix(out, "3. No, stop\n^[[A") {
+		t.Errorf("want one Up then Enter: %q", out)
+	}
+	if c, err := f.Answer("m", "n", "no, stop"); err != nil || c.Label != "3. No, stop" {
+		t.Fatalf("answer n: %+v %v", c, err)
+	}
+	if out := strings.ReplaceAll(waitFor("m", "B"), "^[O", "^[["); !strings.HasSuffix(out, "\n^[[A\n^[[B") {
+		t.Errorf("want one Down for n: %q", out)
+	}
+	if _, err := f.Choose("m", 5, ""); err == nil {
+		t.Error("option 5 of 3 accepted")
+	}
+	if _, err := f.Choose("x", 1, ""); err == nil || !strings.Contains(err.Error(), "no numbered prompt") {
+		t.Errorf("choose without menu: %v", err)
+	}
+	if got := MenuKeys(3, 1); strings.Join(got, ",") != "Up,Up,Enter" {
+		t.Errorf("menu keys %v", got)
+	}
+
+	waitFor("s", "> ")
+	if err := f.Send("s", "hello"); err != nil {
+		t.Fatalf("send with swallowed Enter: %v", err)
+	}
+	waitFor("s", "submitted hello")
+	waitFor("x", "[Paste #1")
+	if err := f.Send("x", "hi"); err == nil || !strings.Contains(err.Error(), "not submitted") {
+		t.Errorf("stuck paste: %v", err)
+	}
+	// A prompt on screen: no retry Enter, which would answer it.
+	waitFor("q", "[Paste #1")
+	if err := f.Send("q", "hi"); err == nil || !strings.Contains(err.Error(), "not submitted") {
+		t.Errorf("paste under a prompt: %v", err)
+	}
+	if out, _ := f.Peek("q", 0); strings.Count(out, "got") != 1 {
+		t.Errorf("want exactly one Enter: %q", out)
+	}
+	if line, err := f.Prompting("x"); err != nil || line != "" {
+		t.Errorf("unsubmitted input is no prompt: %q %v", line, err)
+	}
+	if line, _ := f.Prompting("m"); line == "" {
+		t.Error("menu agent should be prompting")
+	}
+	if err := CheckKeys([]string{"Enter", "C-c"}); err == nil {
+		t.Error("C-c allowed")
+	}
+}
+
+func TestMode(t *testing.T) {
+	for in, want := range map[string]string{
+		" Autopilot · Allow All · ● Working · 32.6 KiB esc esc interrupt\nctx ██ 5%":        "Autopilot · Allow All",
+		" ← open sidebar · Interactive · Manual Approval · @ files · space hold to record ": "Interactive · Manual Approval",
+		"> ": "",
+	} {
+		if got := Mode(in); got != want {
+			t.Errorf("%q: got %q want %q", in, got, want)
+		}
+	}
+}
+
+// noPlaybook pins FLEET_CONFIG to a file that turns the worker playbook off,
+// for tests about where a pasted prompt lands: the multi-line playbook would
+// scroll the pane and move the prompt away from the input box marker.
+func noPlaybook(t *testing.T, home string) {
+	t.Helper()
+	cfg := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(cfg, []byte("[defaults]\nplaybook = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FLEET_CONFIG", cfg)
 }

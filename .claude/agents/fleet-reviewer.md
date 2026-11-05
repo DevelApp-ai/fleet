@@ -13,7 +13,7 @@ Check, in order, and report only real problems:
 3. Safety rules from AGENTS.md: only `fleet`, `fleet-dev`, `fleet-test-*` sockets, and tests never use `fleet`; no pkill/killall; no real agent CLIs started in tests; nothing destructive without the confirmed flag on MCP tools that close/answer.
 4. Conventions: geometry only in `internal/layout`, profiles/patterns as data, slog with a component attribute, stdlib + Charm deps only.
 5. Tests: would they fail without the change? Missing a case the brief lists?
-6. Docs: usage text, `internal/mcp/instructions.md` if MCP changed.
+6. Docs: usage text, `internal/mcp/instructions.md` if MCP changed, and a `CHANGELOG.md` line for a user-facing change.
 
 You may run `go build ./... && go vet ./... && go test ./...` to confirm.
 

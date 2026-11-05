@@ -1,4 +1,4 @@
-// Package layout owns ALL pane geometry of the main fleet window: supervisor
+// Package layout owns ALL pane geometry of the main fleet window: admiral
 // side and width, overview strip height and the wall presets. Change the
 // numbers here; nothing else hard-codes sizes.
 package layout
@@ -17,7 +17,9 @@ type Config struct {
 	MinPaneW      int // smallest readable wall pane width
 	MinPaneH      int // smallest readable wall pane height (incl. the border-status row)
 	FocusPercent  int // emphasis pane share of the wall
-	TileW, TileH  int // overview tile size (used by the TUI)
+	TileW, TileH  int // overview tile: minimum width and height (used by the TUI)
+	TileComfortW  int // overview tiles wrap onto more rows to reach this width
+	TileMaxW      int // overview tiles never grow wider than this
 }
 
 // Default is the designer-reviewed layout.
@@ -34,9 +36,11 @@ var Default = Config{
 	FocusPercent:  60,
 	TileW:         26,
 	TileH:         6,
+	TileComfortW:  34,
+	TileMaxW:      48,
 }
 
-// SupCols returns the supervisor width for a window width.
+// SupCols returns the admiral width for a window width.
 func (c Config) SupCols(w int) int {
 	if w < c.NarrowBelow {
 		return c.SupWidthNarr

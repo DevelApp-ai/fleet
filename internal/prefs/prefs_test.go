@@ -104,3 +104,80 @@ func TestNilPrefsIsNeutral(t *testing.T) {
 		t.Error("nil ToolsDoc")
 	}
 }
+
+func TestEnvMergesAndMaxWorking(t *testing.T) {
+	write(t, "[defaults]\nmax_working = 2\nenv = { A = \"1\", B = \"2\" }\n[profile.copilot]\nenv = { B = \"3\" }\n")
+	p, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.For("copilot").Env; !reflect.DeepEqual(got, map[string]string{"A": "1", "B": "3"}) {
+		t.Errorf("copilot env %v", got)
+	}
+	if got := p.For("claude").Env; !reflect.DeepEqual(got, map[string]string{"A": "1", "B": "2"}) {
+		t.Errorf("claude env %v", got)
+	}
+	if p.MaxWorking() != 2 {
+		t.Errorf("max_working %d", p.MaxWorking())
+	}
+	write(t, "[defaults]\nmode = \"\"\n")
+	if p, _ := Load(); p.MaxWorking() != DefaultMaxWorking {
+		t.Errorf("default max_working %d", p.MaxWorking())
+	}
+	write(t, "[defaults]\nmax_working = -1\n")
+	if _, err := Load(); err == nil {
+		t.Error("negative max_working accepted")
+	}
+}
+
+func TestPlaybookPref(t *testing.T) {
+	if !Neutral().Playbook {
+		t.Fatal("playbook should default to on")
+	}
+	write(t, "[defaults]\nplaybook = false\n")
+	p, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.For("copilot").Playbook {
+		t.Error("[defaults] playbook = false ignored")
+	}
+	write(t, "[profile.x]\nplaybook = false\n")
+	if p, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if p.For("x").Playbook {
+		t.Error("[profile.x] playbook = false ignored")
+	}
+	if !p.For("y").Playbook {
+		t.Error("other profile lost the default")
+	}
+}
+
+func TestDeadPaneGrace(t *testing.T) {
+	write(t, `
+[defaults]
+dead_pane_grace = "2m"
+
+[profile.zero]
+dead_pane_grace = "0"
+
+[profile.off]
+dead_pane_grace = " Off "
+
+[profile.bad]
+dead_pane_grace = "-1m"
+`)
+	p, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Neutral().DeadPaneGrace != 5*time.Minute {
+		t.Errorf("default %v", Neutral().DeadPaneGrace)
+	}
+	for prof, want := range map[string]time.Duration{"copilot": 2 * time.Minute, "zero": 0, "off": GraceOff, "bad": 2 * time.Minute} {
+		if got := p.For(prof).DeadPaneGrace; got != want {
+			t.Errorf("%s: %v want %v", prof, got, want)
+		}
+	}
+}

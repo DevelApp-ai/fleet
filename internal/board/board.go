@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sturlabragason/fleet/internal/logx"
+	"github.com/sturlabragason/fleet/internal/status"
 )
 
 // Agent is one board entry.
@@ -28,6 +29,48 @@ type Agent struct {
 	Hash        uint64    `json:"hash"`
 	LastChange  time.Time `json:"last_change"`
 	Created     time.Time `json:"created"`
+	// Subagents come from the tool's session event log (DESIGN.md §4
+	// Subagents); SubLogOffset is how far that log has been read.
+	Subagents    []status.Subagent `json:"subagents,omitempty"`
+	SubLogOffset int64             `json:"sub_log_offset,omitempty"`
+	// SubKnown maps recent subagent agentIds to their launch, so a
+	// write_agent can re-wake one already pruned from Subagents.
+	SubKnown []status.KnownSub `json:"sub_known,omitempty"`
+	// Report is the agent's latest report to the admiral (DESIGN §6.7).
+	Report *Report `json:"report,omitempty"`
+	// Baseline is the dir's git state at spawn, so auto-close can tell the
+	// agent's own changes from earlier ones (DESIGN §6.7). nil: not a git
+	// work tree, adopted, or spawned by an older fleet.
+	Baseline *GitBase `json:"baseline,omitempty"`
+	// Exit is the first sighting of the agent's dead pane (DESIGN §6.7,
+	// ADR-33); set once, so each death is reported once.
+	Exit *Exit `json:"exit,omitempty"`
+}
+
+// Exit is how an agent's process ended, as tmux reported it.
+type Exit struct {
+	// Code is the exit status; nil when killed by a signal or tmux did not say.
+	Code *int `json:"code,omitempty"`
+	// Signal is the signal number that ended it, 0 for none.
+	Signal int       `json:"signal,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Clean reports an exit with status 0 and no signal.
+func (e *Exit) Clean() bool { return e != nil && e.Code != nil && *e.Code == 0 && e.Signal == 0 }
+
+// GitBase is a work tree's state before an agent started.
+type GitBase struct {
+	Head      string            `json:"head"`
+	Dirty     map[string]string `json:"dirty,omitempty"` // path -> "XY fingerprint"
+	Worktrees []string          `json:"worktrees,omitempty"`
+}
+
+// Report is one agent report: done, blocked, question or progress.
+type Report struct {
+	State   string    `json:"state"`
+	Summary string    `json:"summary"`
+	At      time.Time `json:"at"`
 }
 
 // Board is the whole file.

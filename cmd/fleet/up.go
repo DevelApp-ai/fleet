@@ -23,48 +23,60 @@ import (
 	"github.com/sturlabragason/fleet/internal/wall"
 )
 
-// supLaunch is how to start the supervisor pane.
+// supLaunch is how to start the admiral pane.
 type supLaunch struct {
 	Cmd, Dir string
 	Env      []string
 	ID       string // session id, "" if the profile can't set one
 	Profile  string
+	Paste    string // boot prompt to paste once ready (profile has no prompt_args)
 }
 
-// supervisorCmd builds the supervisor command for profile ("": the
-// FLEET_SUPERVISOR_PROFILE env, else copilot). A non-empty boot prompt is
-// passed with -i to copilot-pattern profiles (used by supervisor reset).
+// supervisorCmd builds the admiral command for profile ("": resolved by
+// resolveAdmiral, DESIGN §6.10). A non-empty boot prompt goes through the
+// profile's prompt_args (copilot -i, claude positional), else into Paste.
 func supervisorCmd(f *fleet.Fleet, prof, boot string) (supLaunch, error) {
 	if prof == "" {
-		prof = os.Getenv("FLEET_SUPERVISOR_PROFILE")
+		prof = resolveAdmiral(f)
 	}
-	if prof == "" {
-		prof = "copilot"
-	}
+	return admiralLaunch(f, prof, "", boot)
+}
+
+// admiralLaunch builds the admiral command; a non-empty resumeID resumes that
+// session with the profile's resume args instead of starting a new one.
+func admiralLaunch(f *fleet.Fleet, prof, resumeID, boot string) (supLaunch, error) {
 	p, ok := f.Profiles[prof]
 	if !ok {
-		return supLaunch{}, fmt.Errorf("supervisor profile %q not found", prof)
+		return supLaunch{}, fmt.Errorf("admiral profile %q not found", prof)
 	}
-	dir := os.Getenv("FLEET_SUPERVISOR_DIR")
+	dir := admiralEnv("DIR")
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(filepath.Dir(f.Exe)), "supervisor")
 	}
-	id := ""
-	if len(p.LaunchID) > 0 {
+	if _, err := os.Stat(dir); err != nil {
+		// No checkout next to the binary (go install): any readable cwd will do,
+		// the admiral works through MCP tools, not files.
+		home, _ := os.UserHomeDir()
+		logx.For("up").Info("admiral dir missing, using home", "dir", dir, "home", home)
+		dir = home
+	}
+	id := resumeID
+	if id == "" && len(p.LaunchID) > 0 {
 		id = tools.NewUUID()
 	}
-	argv, _ := p.Argv(tools.Vars{Fleet: f.Exe, Name: "supervisor", ID: id}, tools.Launch{})
-	argv = append(argv, supervisorMCPArgs(p)...)
-	if boot != "" && p.Patterns == "copilot" {
-		argv = append(argv, "-i", boot)
+	argv, embedded := p.Argv(tools.Vars{Fleet: f.Exe, Name: "admiral", ID: id},
+		tools.Launch{Resume: resumeID != "", Extra: admiralMCPArgs(p, f.Exe), Prompt: boot})
+	logx.For("up").Info("admiral", "profile", prof, "dir", dir, "argv", argv, "resume", resumeID != "")
+	sl := supLaunch{Cmd: tools.ShellCommand(argv), Dir: dir, Env: p.EnvList(), ID: id, Profile: prof}
+	if boot != "" && !embedded {
+		sl.Paste = boot
 	}
-	logx.For("up").Info("supervisor", "profile", prof, "dir", dir, "argv", argv)
-	return supLaunch{Cmd: tools.ShellCommand(argv), Dir: dir, Env: p.EnvList(), ID: id, Profile: prof}, nil
+	return sl, nil
 }
 
-// supervisorMCPArgs makes a copilot supervisor lean: only the fleet MCP tools
+// supervisorMCPArgs makes a copilot admiral lean: only the fleet MCP tools
 // (loaded from supervisor/.mcp.json) are available and pre-approved, and the
-// global instructions and skills are skipped. The supervisor rules arrive as
+// global instructions and skills are skipped. The admiral rules arrive as
 // the fleet MCP server instructions. Measured: ~8k input tokens per turn
 // instead of ~160k, and no reading of Go code or shelling out.
 func supervisorMCPArgs(p tools.Profile) []string {
@@ -85,7 +97,7 @@ func userMCPConfig() string {
 	return filepath.Join(home, ".copilot", "mcp-config.json")
 }
 
-// disableUserMCPArgs disables the user's own MCP servers for the supervisor so
+// disableUserMCPArgs disables the user's own MCP servers for the admiral so
 // their tools don't load (and don't flood the startup "Disabled tools" notice).
 func disableUserMCPArgs(path string) []string {
 	b, err := os.ReadFile(path)
@@ -115,10 +127,17 @@ func disableUserMCPArgs(path string) []string {
 func cmdUp(f *fleet.Fleet, args []string) error {
 	t := f.T
 	log := logx.For("up")
-	noAttach := len(args) > 0 && args[0] == "--no-attach"
+	noAttach, explicit, err := parseUpArgs(args)
+	if err != nil {
+		return err
+	}
+	prof, warns, err := resolveAdmiralProfile(explicit, f.Profiles, os.Getenv, supervisor.LoadChoice(f.Home), f.Prefs.AdmiralProfile())
+	if err != nil {
+		return err
+	}
 	target := fleet.Session + ":main"
 	if _, err := t.Run("has-session", "-t", "="+fleet.Session); err != nil || !windowExists(f, "main") {
-		sl, err := supervisorCmd(f, "", "")
+		sl, err := supervisorCmd(f, prof, "")
 		if err != nil {
 			return err
 		}
@@ -138,13 +157,20 @@ func cmdUp(f *fleet.Fleet, args []string) error {
 		}
 		t.SetPaneOption(sup, "@role", "sup")
 		t.SetPaneOption(sup, "remain-on-exit", "on")
+		t.SetPaneOption(sup, "@fleet_admiral_profile", sl.Profile)
+		if explicit != "" {
+			saveChoice(f, explicit)
+		}
 		if err := supervisor.Save(f.Home, supervisor.Session{SessionID: sl.ID, Profile: sl.Profile, PaneID: sup, Started: time.Now(), Generation: 1}); err != nil {
-			log.Error("save supervisor session", "err", err)
+			log.Error("save admiral session", "err", err)
 		}
 		log.Info("created main window", "sup", sup)
+	} else if explicit != "" {
+		upSwap(f, explicit)
 	}
 	ensureOverview(f, target)
 	configure(f)
+	warnAdmiral(f, warns)
 	w := wall.New(t, fleet.Session)
 	if err := w.Apply(); err != nil {
 		log.Error("apply", "err", err)
@@ -222,7 +248,7 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		{"set-option", "-g", "pane-border-style", "fg=" + theme.Surface1},
 		{"set-option", "-g", "pane-active-border-style", "fg=" + theme.Select},
 		{"set-option", "-g", "pane-border-format",
-			" #{?#{==:#{@role},sup},#[fg=" + theme.Supervisor + "]#[bold]supervisor#[default]#{?@fleet_ctx,#[fg=#{@fleet_ctx_color}] · ctx #{@fleet_ctx}#[default],},#{?#{==:#{@role},ov},#[fg=" + theme.Text + "]#[bold]overview#[default],#[fg=#{?@fleet_color,#{@fleet_color},default}]#{@fleet_glyph} #{@fleet_agent} #[fg=" + theme.Muted + "]#{@fleet_status}#[default]}} "},
+			" #{?#{==:#{@role},sup},#[fg=" + theme.Supervisor + "]#[bold]admiral#[default]#{?@fleet_admiral_profile,#[fg=" + theme.Muted + "] · #{@fleet_admiral_profile}#[default],}#{?@fleet_ctx,#[fg=#{@fleet_ctx_color}] · ctx #{@fleet_ctx}#[default],},#{?#{==:#{@role},ov},#[fg=" + theme.Text + "]#[bold]overview#[default],#[fg=#{?@fleet_color,#{@fleet_color},default}]#{@fleet_glyph} #{@fleet_agent}#{?@fleet_team, #[fg=#{@fleet_team_color}]◆,} #[fg=" + theme.Muted + "]#{@fleet_status}#[default]}} "},
 		{"set-option", "-g", "window-style", "fg=" + theme.Subtext0 + ",bg=" + theme.Base},
 		{"set-option", "-g", "window-active-style", "fg=" + theme.Text + ",bg=" + theme.Base},
 		{"set-option", "-g", "status-style", "fg=" + theme.Text + ",bg=" + theme.Mantle},
@@ -239,7 +265,7 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		{"set-option", "-g", "window-status-separator", ""},
 		{"set-option", "-g", "window-status-format", "#[fg=" + theme.Overlay1 + "] #I #W "},
 		{"set-option", "-g", "window-status-current-format", "#[fg=" + theme.Crust + ",bg=" + theme.Lavender + ",bold] #I #W #[default]"},
-		{"set-option", "-g", "status-right", "#[fg=" + theme.Overlay1 + "]" + keys.Hint(keys.ScopeTmux, statusRightLen-1) + " "},
+		{"set-option", "-g", "status-right", "#[fg=" + theme.Overlay1 + "]" + clickableChanges(keys.Hint(keys.ScopeTmux, statusRightLen-1)) + " "},
 		{"set-option", "-g", "status-right-length", strconv.Itoa(statusRightLen)},
 		{"set-hook", "-g", "client-resized", wallCmd("apply")},
 		{"set-hook", "-g", "client-attached", wallCmd("apply")},
@@ -258,9 +284,12 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		{"bind-key", "-n", "M-c", wallCmd("chips")},
 		{"bind-key", "-n", "M-o", "select-pane", "-t", "{marked}"},
 		append([]string{"bind-key", "-n", "M-R"}, confirmResetArgs(f.Exe)...),
+		append([]string{"bind-key", "-n", "M-P"}, pickPopupArgs(f)...),
 		{"bind-key", "-n", keys.HelpTmuxKey, "display-popup", "-E", "-b", "rounded",
 			"-w", strconv.Itoa(keys.PopupWidth()), "-h", strconv.Itoa(keys.PopupHeight()),
 			"-T", " fleet keys · any key closes ", exe + " keys --popup"},
+		append([]string{"bind-key", "-n", keys.ChangesTmuxKey}, changesPopupArgs(exe)...),
+		changesStatusClick(exe),
 	}
 	for _, p := range []string{"1", "2", "4", "6", "9", "m"} {
 		set = append(set, []string{"bind-key", "-n", "M-" + p, wallCmd("preset " + p)})
@@ -268,6 +297,9 @@ func tmuxCommands(f *fleet.Fleet) [][]string {
 		set = append(set, []string{"bind-key", "-T", "fleetwall", p, wallCmd("preset " + p)})
 	}
 	set = append(set, []string{"bind-key", "-n", "M-w", "switch-client", "-T", "fleetwall", "\\;", "display-message", "wall layout: press 1 2 4 6 9 or m (release Alt first)"})
+	if cc := hostCopyCommand(); cc != "" {
+		set = append(set, []string{"set-option", "-s", "copy-command", cc})
+	}
 	return set
 }
 

@@ -57,8 +57,8 @@ func (f *Fleet) Adopt(o AdoptOpts) (*board.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	argv, _ := p.Argv(tools.Vars{Fleet: f.Exe, Name: name, ID: id}, tools.Launch{Resume: true})
-	a, err := f.start(name, o.Profile, p, dir, "", id, argv)
+	argv, _ := p.Argv(tools.AgentVars(f.Exe, name, id), tools.Launch{Resume: true})
+	a, err := f.start(name, o.Profile, p, dir, "", "", id, argv, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func (f *Fleet) adoptName(name, dir string) (string, error) {
 		return onBoard || f.paneOf(n) != ""
 	}
 	if name != "" {
-		if !nameRe.MatchString(name) {
+		if !validName(name) {
 			return "", fmt.Errorf("bad name %q", name)
 		}
 		if taken(name) {
@@ -121,7 +121,7 @@ func (f *Fleet) adoptName(name, dir string) (string, error) {
 		return name, nil
 	}
 	base := strings.Trim(nameBadRe.ReplaceAllString(filepath.Base(dir), "-"), "-_.")
-	if base == "" || !nameRe.MatchString(base[:min(len(base), 32)]) {
+	if base == "" || !validName(base[:min(len(base), 32)]) {
 		base = "adopted"
 	}
 	for i := 1; ; i++ {

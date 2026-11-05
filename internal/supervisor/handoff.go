@@ -16,10 +16,14 @@ const (
 
 func handoffPath(home string) string { return filepath.Join(Dir(home), "handoff.md") }
 
-// WriteHandoff writes supervisor/handoff.md, moving the previous one to
-// supervisor/handoffs/<timestamp>.md and keeping the last 20 of those.
+// WriteHandoff writes admiral/handoff.md, moving the previous one to
+// admiral/handoffs/<timestamp>.md and keeping the last 20 of those.
 func WriteHandoff(home, text string) error {
-	old := filepath.Join(Dir(home), "handoffs")
+	dir, err := mkdir(home)
+	if err != nil {
+		return err
+	}
+	old := filepath.Join(dir, "handoffs")
 	if err := os.MkdirAll(old, 0o755); err != nil {
 		return err
 	}

@@ -19,6 +19,36 @@ auto_submit = true
 # anyway. Spawn polls the pane rather than sleeping a fixed amount. Spawn blocks
 # for up to this long, including the fleet_spawn MCP call, so keep it modest.
 ready_timeout = "15s"
+# Close an agent when it reports done (fleet_report) and left no work of its
+# own: no new or changed uncommitted files since spawn, no new worktree, no
+# commits unmerged into main/master. Dirs outside git close. Never removes the
+# worktree or branch.
+# auto_close_done = false
+# With auto_close_done: also close a done agent idle this long once the check
+# passes (e.g. after the admiral merged its branch). Off when unset.
+# auto_close_idle = "15m"
+# An agent whose process exits cleanly (/exit) closes at once. One that crashes
+# (non-zero exit or a signal) is reported to the admiral and closed after this
+# long: "0" closes at once, "off" never. Its dir and session stay on disk.
+# dead_pane_grace = "5m"
+# playbook = true  # prepend the fleet worker playbook to the first prompt (DESIGN §4)
+# Added to every agent pane's environment (spawn and adopt), over the profile's
+# own env. [profile.<name>] env keys override these one by one. Keeps parallel
+# builds and tests from each taking every core (DESIGN §7a, docs/perf.md).
+# PATH is reserved: fleet sets it (~/.local/bin + your PATH) and ignores it here.
+# env = { GOFLAGS = "-p=4", GOMAXPROCS = "4" }
+# At most this many agents work at once; further spawns queue and the overview
+# TUI starts them as slots free. 0 = no cap. Fleet-wide, [defaults] only.
+# max_working = 4
+# Which agents may message each other without asking (DESIGN §6.6, ADR-34).
+# "team": the same team, or the same repo (any worktree) when neither has a team.
+#         Other pairs ask, and you or the target agent decide. Teams can be
+#         different clients or private projects; this keeps messages inside one.
+# "open": every agent may message every other.
+# "ask":  every pair asks first, teammates too.
+# Every message is logged (`fleet access log`), and `fleet access revoke A B`
+# still stops any pair. Fleet-wide, [defaults] only; takes effect at once.
+# agent_mail = "team"
 
 [profile.copilot]
 # WARNING: "autopilot" for Copilot launches `--allow-all --autopilot`.
@@ -47,3 +77,9 @@ mode = "autopilot"
 # splits each value on whitespace. Limitation: an argument that itself contains
 # a space cannot be written this way; put it in `args` or `extra_args`.
 mode_args = { autopilot = "--allow-all --autopilot", plan = "--plan" }
+
+# The admiral's tool profile when nothing else picks one (DESIGN §6.10).
+# Order: fleet --admiral-profile > $FLEET_ADMIRAL_PROFILE > last choice
+# (Alt-P / fleet admiral profile NAME) > this > copilot.
+# [admiral]
+# profile = "claude-personal"

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -245,5 +246,74 @@ func TestLoadWithIgnoresCommandlessLocalSections(t *testing.T) {
 	}
 	if ps["mine"].Command != "mytool" {
 		t.Errorf("mine = %+v", ps["mine"])
+	}
+}
+
+func TestPeerArgs(t *testing.T) {
+	ps, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for prof, flag := range map[string]string{"copilot": "--additional-mcp-config", "claude-copilot": "--additional-mcp-config",
+		"claude": "--mcp-config"} {
+		argv, _ := ps[prof].Argv(AgentVars("/bin/fleet", "a1", "U"), Launch{Resume: true})
+		if len(argv) < 3 || argv[1] != flag {
+			t.Fatalf("%s: peer args not right after command: %v", prof, argv)
+		}
+		var cfg struct {
+			MCPServers map[string]struct {
+				Type    string   `json:"type"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+				Tools   []string `json:"tools"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal([]byte(argv[2]), &cfg); err != nil {
+			t.Fatalf("%s: bad json %q: %v", prof, argv[2], err)
+		}
+		s := cfg.MCPServers["fleet-peer"]
+		if s.Command != "/bin/fleet" || !reflect.DeepEqual(s.Args, []string{"mcp", "--agent", "a1"}) {
+			t.Errorf("%s: server %+v", prof, s)
+		}
+		wantType, wantTools := "stdio", 0
+		if flag == "--additional-mcp-config" {
+			wantType, wantTools = "local", 1
+		}
+		if s.Type != wantType || len(s.Tools) != wantTools {
+			t.Errorf("%s: type %q tools %v", prof, s.Type, s.Tools)
+		}
+	}
+	for _, prof := range []string{"agy", "vibe", "fake"} {
+		if argv, _ := ps[prof].Argv(AgentVars("/bin/fleet", "a1", ""), Launch{}); strings.Contains(strings.Join(argv, " "), "mcp") {
+			t.Errorf("%s has peer args: %v", prof, argv)
+		}
+	}
+}
+
+func TestSubagentLogPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ps, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".copilot", "session-state", "S1", "events.jsonl")
+	for _, n := range []string{"copilot", "claude-copilot"} {
+		if g := ps[n].SubagentLogPath("S1"); g != want {
+			t.Errorf("%s: %q, want %q", n, g, want)
+		}
+		if g := ps[n].SubagentLogPath(""); g != "" {
+			t.Errorf("%s: empty id gave %q", n, g)
+		}
+	}
+	for _, n := range []string{"claude", "agy", "vibe", "fake"} {
+		if g := ps[n].SubagentLogPath("S1"); g != "" {
+			t.Errorf("%s has a subagent log: %q", n, g)
+		}
+	}
+	os.WriteFile(Path(home), []byte("[fake]\nsubagent_log = \"/tmp/{id}.log\"\n"), 0o644)
+	ps, _ = Load(home)
+	if g := ps["fake"].SubagentLogPath("X"); g != "/tmp/X.log" {
+		t.Errorf("override: %q", g)
 	}
 }

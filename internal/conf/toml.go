@@ -58,14 +58,14 @@ func Parse(s string) (Doc, error) {
 }
 
 func stripComment(s string) string {
-	in := false
+	in, lit := false, false // inside a "basic" or a 'literal' string
 	for i, r := range s {
 		switch {
-		case r == '"' && (i == 0 || s[i-1] != '\\'):
+		case r == '"' && !lit && (i == 0 || s[i-1] != '\\'):
 			in = !in
 		case r == '\'' && !in:
-			// literal strings: toggle handled by scanning to next quote
-		case r == '#' && !in:
+			lit = !lit
+		case r == '#' && !in && !lit:
 			return s[:i]
 		}
 	}

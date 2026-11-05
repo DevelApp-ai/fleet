@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -125,5 +126,88 @@ func TestTmuxBindingsMatchRegistry(t *testing.T) {
 	}
 	if got := popup[len(popup)-1]; got != "'/opt/my fleet/fleet' keys --popup" {
 		t.Errorf("popup command %q", got)
+	}
+}
+
+// The wall border shows a ◆ in the team colour after the agent name, and
+// expands exactly as before for a pane without a team.
+func TestBorderFormatTeamMark(t *testing.T) {
+	c := &tmux.Client{Socket: fmt.Sprintf("fleet-test-%d", rand.Int63()), Config: "/dev/null"}
+	t.Cleanup(func() { c.KillServer() })
+	if _, err := c.Run("new-session", "-d", "-s", "f", "-n", "main", "cat"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	var format string
+	for _, a := range tmuxCommands(&fleet.Fleet{T: c, Exe: "/usr/bin/fleet"}) {
+		if len(a) == 4 && a[2] == "pane-border-format" {
+			format = a[3]
+		}
+	}
+	old := strings.Replace(format, "#{?@fleet_team, #[fg=#{@fleet_team_color}]◆,}", "", 1)
+	if format == "" || old == format {
+		t.Fatalf("format has no team mark: %q", format)
+	}
+	pane, _ := c.Run("display-message", "-p", "-t", "f:main", "#{pane_id}")
+	for k, v := range map[string]string{"@fleet_agent": "a1", "@fleet_glyph": "●", "@fleet_status": "waiting", "@fleet_color": "#f9e2af"} {
+		c.SetPaneOption(pane, k, v)
+	}
+	expand := func(f string) string {
+		out, err := c.Run("display-message", "-p", "-t", pane, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got, want := expand(format), expand(old); got != want {
+		t.Errorf("no team: got %q, want today's %q", got, want)
+	}
+	c.SetPaneOption(pane, "@fleet_team", "alpha")
+	c.SetPaneOption(pane, "@fleet_team_color", "#89b4fa")
+	got := expand(format)
+	if !strings.Contains(got, "● a1 #[fg=#89b4fa]◆ #[fg=") || strings.Contains(got, "alpha") {
+		t.Errorf("team: %q", got)
+	}
+}
+
+// VTE terminals (Ptyxis, GNOME Terminal) drop tmux's OSC 52, so a copy in a
+// fleet pane never reached the system clipboard. copy-command must name the
+// session's clipboard tool.
+func TestCopyCommand(t *testing.T) {
+	env := func(kv ...string) func(string) string {
+		return func(k string) string {
+			for i := 0; i+1 < len(kv); i += 2 {
+				if kv[i] == k {
+					return kv[i+1]
+				}
+			}
+			return ""
+		}
+	}
+	look := func(have ...string) func(string) (string, error) {
+		return func(b string) (string, error) {
+			for _, h := range have {
+				if h == b {
+					return "/usr/bin/" + b, nil
+				}
+			}
+			return "", exec.ErrNotFound
+		}
+	}
+	for _, c := range []struct {
+		name string
+		env  func(string) string
+		look func(string) (string, error)
+		goos string
+		want string
+	}{
+		{"wayland", env("WAYLAND_DISPLAY", "wayland-0", "DISPLAY", ":0"), look("wl-copy", "xclip"), "linux", "wl-copy"},
+		{"wayland without wl-copy falls back to X", env("WAYLAND_DISPLAY", "wayland-0", "DISPLAY", ":0"), look("xclip"), "linux", "xclip -selection clipboard -in"},
+		{"x11 xsel", env("DISPLAY", ":0"), look("xsel", "wl-copy"), "linux", "xsel --clipboard --input"},
+		{"macos", env(), look("pbcopy"), "darwin", "pbcopy"},
+		{"headless", env(), look("wl-copy", "xclip"), "linux", ""},
+	} {
+		if got := copyCommand(c.env, c.look, c.goos); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
 	}
 }

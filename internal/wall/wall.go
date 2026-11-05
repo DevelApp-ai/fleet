@@ -1,4 +1,4 @@
-// Package wall manages the main fleet window: supervisor, overview and the
+// Package wall manages the main fleet window: admiral, overview and the
 // live wall of agent panes moved in with join-pane / out with break-pane.
 // All state lives in tmux (window options and pane @role/@fleet_used tags),
 // so the TUI and `fleet wall ...` key bindings can both drive it.
@@ -36,7 +36,7 @@ type State struct {
 	Wall      []tmux.PaneInfo // in window order
 	Preset    string
 	Cfg       layout.Config
-	SupHidden string // pane id of hidden supervisor, if any
+	SupHidden string // pane id of hidden admiral, if any
 }
 
 func (w *Wall) opt(name string) string {
@@ -245,6 +245,15 @@ func (w *Wall) Show(pane string) (bool, error) {
 	return true, err
 }
 
+// Slots is how many agent panes the current preset holds.
+func (w *Wall) Slots() (int, error) {
+	s, err := w.Read()
+	if err != nil {
+		return 0, err
+	}
+	return s.Cfg.Slots(s.Preset), nil
+}
+
 // FullMsg is shown when every wall pane is protected from eviction.
 const FullMsg = "wall full: every pane is waiting or failing (M-x to free one)"
 
@@ -308,7 +317,7 @@ func (w *Wall) HideFocused() error {
 	}
 	id, role, _ := strings.Cut(out, "\t")
 	if role != "wall" {
-		w.T.Run("display-message", "M-x: focus a wall pane first (supervisor/overview stay)")
+		w.T.Run("display-message", "M-x: focus a wall pane first (admiral/overview stay)")
 		return nil
 	}
 	return w.Hide(id)
@@ -381,7 +390,7 @@ func (w *Wall) fill(s *State, slots int) int {
 	return added
 }
 
-// ToggleSup hides or shows the supervisor pane.
+// ToggleSup hides or shows the admiral pane.
 func (w *Wall) ToggleSup() error {
 	s, err := w.Read()
 	if err != nil {
@@ -411,10 +420,10 @@ func (w *Wall) ToggleSup() error {
 			return w.Apply()
 		}
 	}
-	return fmt.Errorf("no supervisor pane")
+	return fmt.Errorf("no admiral pane")
 }
 
-// SwapSide moves the supervisor to the other side.
+// SwapSide moves the admiral to the other side.
 func (w *Wall) SwapSide() error {
 	s, err := w.Read()
 	if err != nil {
