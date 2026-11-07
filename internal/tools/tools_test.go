@@ -93,6 +93,7 @@ func TestSessionPath(t *testing.T) {
 		"copilot":        "~/.copilot/session-state/{id}",
 		"claude-copilot": "~/.copilot/session-state/{id}",
 		"claude":         "~/.claude/projects/*/{id}.jsonl",
+		"vibe":           "~/.vibe/logs/session/unified/{id}",
 		"agy":            "",
 		"fake":           "",
 	} {

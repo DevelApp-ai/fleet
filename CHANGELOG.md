@@ -4,6 +4,9 @@ User-facing changes, newest first. `fleet changes` and `Alt-g` show this file; i
 
 To add an entry: one line under today's `## YYYY-MM-DD` heading (add the heading if it is missing), at the top of that day, in the same commit as the change. Say what the user can do now, not how it was built. End with the ADR or commit in brackets when there is one: `(ADR-27)`, `(66a2ece, ADR-27)`.
 
+## 2026-11-07
+- Adopt your own vibe sessions: `fleet sessions` now lists sessions the Vibe CLI saved by itself — title, dir, branch and model from `~/.vibe/logs/session/unified/` — skips one that is already running, and `fleet adopt <words>` resumes one as an agent. Copilot and Claude sessions are unchanged (fleet#9, ADR-62)
+
 ## 2026-11-06
 - Fleet keeps out of a session you are talking to: `fleet spawn --interactive` (or `interactive: true` on `fleet_spawn`) marks an agent as yours, so it is never auto-closed and reports progress instead of done until you end the session. Fleet also notices by itself when you type in an agent's pane and marks it `✎`. While you are typing there, or have an interactive agent's pane open, or have unsent text in its box, `fleet_send` and `fleet send` refuse to type over you unless forced (`force: true`, `--force`) (fleet#1, ADR-61)
 - Copilot agents start with about 40% less context: the `copilot` and `claude-copilot` profiles now leave out the built-in tools no fleet agent uses (workflows, the session database, memory, canvas, schedules, the built-in GitHub MCP), and `light` and `standard` agents also go without subagents. A light agent starts at about 26k tokens instead of 47k. Set `context_args` on a profile in `~/.fleet/tools.toml` to change what each effort level gets (ADR-60)

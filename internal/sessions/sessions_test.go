@@ -11,17 +11,19 @@ import (
 	"github.com/sturlabragason/fleet/internal/tools"
 )
 
-// fixture builds a fake Copilot store shared by two profiles and a fake Claude
+// fixture builds a fake Copilot store, a fake Vibe store and a fake Claude
 // store, all under a temp dir. Never touches the real ~/.copilot or ~/.claude*.
-func fixture(t *testing.T) (map[string]tools.Profile, string, string) {
+func fixture(t *testing.T) (map[string]tools.Profile, string, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	cop := filepath.Join(root, "copilot")
+	vib := filepath.Join(root, "vibe", "unified")
 	cla := filepath.Join(root, "claude", "projects")
 	ps := map[string]tools.Profile{
 		"copilot":        {Name: "copilot", SessionPath: cop + "/{id}"},
 		"claude-copilot": {Name: "claude-copilot", Args: []string{"--model", "claude-opus-5", "--allow-all"}, SessionPath: cop + "/{id}"},
 		"claude":         {Name: "claude", SessionPath: cla + "/*/{id}.jsonl"},
+		"vibe":           {Name: "vibe", SessionPath: vib + "/{id}"},
 		"fake":           {Name: "fake"},
 	}
 	now := time.Now()
@@ -59,7 +61,33 @@ func fixture(t *testing.T) (map[string]tools.Profile, string, string) {
 	cl("-src-ledger", "k-string-002", `{"type":"summary","summary":""}`+"\n"+user(`"<command-name>/clear</command-name>"`)+user(`"tenant  bundles\nplease"`), 3*24*time.Hour)
 	long := strings.Repeat("x", 100<<10)
 	cl("-src-ledger", "k-array-0003", `{"type":"system","content":"`+long+`"}`+"\n"+user(`[{"type":"tool_result","content":"r"}]`)+user(`[{"type":"text","text":"grafana orgs"}]`), 5*time.Hour)
-	return ps, cop, cla
+
+	// Vibe: unified/<id>/meta.json + journal/<seq>.jsonl, lease in active/.
+	vi := func(id, meta string, journals map[string]string, ages map[string]time.Duration, ago time.Duration) {
+		d := filepath.Join(vib, id)
+		os.MkdirAll(filepath.Join(d, "journal"), 0o755)
+		os.WriteFile(filepath.Join(d, "meta.json"), []byte(meta), 0o644)
+		at(filepath.Join(d, "meta.json"), ago)
+		for name, body := range journals {
+			p := filepath.Join(d, "journal", name)
+			os.WriteFile(p, []byte(body), 0o644)
+			at(p, ages[name])
+		}
+	}
+	os.MkdirAll(filepath.Join(root, "vibe", "active"), 0o755)
+	os.WriteFile(filepath.Join(root, "vibe", "active", "v-inuse-0003.lock.json"),
+		[]byte(`{"lease_version":1,"session_id":"v-inuse-0003","process_id":`+strconv.Itoa(os.Getpid())+`,"acquired_at":"2026-11-07T09:00:00Z"}`), 0o644)
+	core := func(s string) string { return `{"type":"core_input","payload":` + s + "}" + "\n" }
+	vi("v-inuse-0003", `{"session_id":"v-inuse-0003","title":"Adopt me"}`,
+		map[string]string{"0000000000000001.jsonl": core(`{}`)}, map[string]time.Duration{"0000000000000001.jsonl": 30 * time.Second}, 30*time.Second)
+	vi("v-titled-0001", `{"session_id":"v-titled-0001","title":"Gateway auth refactor","start_time":"2026-11-07T09:00:00Z","end_time":"2026-11-07T09:05:00Z","git_branch":"feat/auth","environment":{"working_directory":"/src/gateway"},"origin_directory":"/src/gw","config":{"active_model":"mistral/mistral-medium-3"}}`,
+		map[string]string{"0000000000000001.jsonl": `{"type":"other"}` + "\n", "0000000000000002.jsonl": core(`{}`)},
+		map[string]time.Duration{"0000000000000001.jsonl": 41 * time.Minute, "0000000000000002.jsonl": 39 * time.Minute}, 40*time.Minute)
+	vi("v-noprompt-02", `{"session_id":"v-noprompt-02","title":"Never asked"}`,
+		map[string]string{"0000000000000001.jsonl": `{"type":"assistant"}` + "\n"}, map[string]time.Duration{"0000000000000001.jsonl": 90 * time.Minute}, 90*time.Minute)
+	vi("v-mismatch-05", `{"session_id":"someone-else","title":"Not mine"}`,
+		map[string]string{"0000000000000001.jsonl": core(`{}`)}, map[string]time.Duration{"0000000000000001.jsonl": 10 * time.Minute}, 10*time.Minute)
+	return ps, cop, vib, cla
 }
 
 func ids(ss []Session) string {
@@ -71,7 +99,7 @@ func ids(ss []Session) string {
 }
 
 func TestList(t *testing.T) {
-	ps, cop, _ := fixture(t)
+	ps, cop, vib, _ := fixture(t)
 	old := Procs
 	Procs = func() []Proc {
 		return []Proc{{PID: 77, Comm: "claude", Argv: []string{"claude", "--resume", "k-title-0001"}}}
@@ -82,7 +110,7 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ids(ss); got != "c-named-0001 k-title-0001 c-prompt-0002 k-array-0003 k-string-002" {
+	if got := ids(ss); got != "v-inuse-0003 c-named-0001 k-title-0001 v-titled-0001 c-prompt-0002 k-array-0003 k-string-002" {
 		t.Fatalf("order/filter: %s", got)
 	}
 	by := map[string]Session{}
@@ -95,6 +123,8 @@ func TestList(t *testing.T) {
 		"k-title-0001":  {"Invoice roles", "claude"},
 		"k-string-002":  {"tenant bundles please", "claude"},
 		"k-array-0003":  {"grafana orgs", "claude"},
+		"v-inuse-0003":  {"Adopt me", "vibe"},
+		"v-titled-0001": {"Gateway auth refactor", "vibe"},
 	}
 	for id, w := range want {
 		if s := by[id]; s.Title != w[0] || s.Profile != w[1] {
@@ -107,10 +137,24 @@ func TestList(t *testing.T) {
 	if s := by["k-title-0001"]; s.Dir != "/src/ledger" || s.Branch != "main" || s.Model != "claude-sonnet-5" || !s.InUse || s.PID != 77 {
 		t.Errorf("claude fields %+v", s)
 	}
+	if s := by["v-titled-0001"]; s.Dir != "/src/gateway" || s.Branch != "feat/auth" || s.Model != "mistral/mistral-medium-3" {
+		t.Errorf("vibe fields %+v", s)
+	}
+	if s := by["v-inuse-0003"]; !s.InUse || s.PID != os.Getpid() {
+		t.Errorf("vibe in use %+v", s)
+	}
 
 	all, _ := List(ps, Opts{All: true, Board: map[string]bool{"c-named-0001": true}})
-	if len(all) != 7 || all[0].ID != "c-named-0001" || !all[0].OnBoard {
+	if len(all) != 11 || all[0].ID != "v-inuse-0003" {
 		t.Errorf("all: %s", ids(all))
+	}
+	for _, s := range all {
+		if s.ID == "c-named-0001" && !s.OnBoard {
+			t.Error("on-board flag missing")
+		}
+		if s.ID == "v-mismatch-05" && (s.HasPrompt || s.Title != "") {
+			t.Errorf("id mismatch parsed: %+v", s)
+		}
 	}
 	if hidden, _ := List(ps, Opts{Board: map[string]bool{"c-named-0001": true}}); strings.Contains(ids(hidden), "c-named-0001") {
 		t.Error("on-board session not hidden")
@@ -118,21 +162,30 @@ func TestList(t *testing.T) {
 	if got, _ := List(ps, Opts{Words: []string{"PORTAL", "nav"}}); ids(got) != "c-named-0001" {
 		t.Errorf("words: %s", ids(got))
 	}
+	if got, _ := List(ps, Opts{Words: []string{"gateway"}}); ids(got) != "v-titled-0001" {
+		t.Errorf("vibe words: %s", ids(got))
+	}
 	if got, _ := List(ps, Opts{Words: []string{"ledger"}, Limit: 2}); ids(got) != "k-title-0001 k-array-0003" {
 		t.Errorf("limit: %s", ids(got))
 	}
-	if got, _ := List(ps, Opts{Words: []string{"ledger"}, SkipBusy: true}); strings.Contains(ids(got), "k-title-0001") {
+	if got, _ := List(ps, Opts{SkipBusy: true}); strings.Contains(ids(got), "v-inuse-0003") || strings.Contains(ids(got), "k-title-0001") {
 		t.Errorf("busy kept: %s", ids(got))
 	}
 	if got, _ := List(ps, Opts{Store: cop + "/{id}"}); ids(got) != "c-named-0001 c-prompt-0002" {
 		t.Errorf("store: %s", ids(got))
 	}
+	if got, _ := List(ps, Opts{Store: vib + "/{id}"}); ids(got) != "v-inuse-0003 v-titled-0001" {
+		t.Errorf("vibe store: %s", ids(got))
+	}
 }
 
 func TestLookup(t *testing.T) {
-	ps, _, _ := fixture(t)
+	ps, _, _, _ := fixture(t)
 	if got := Lookup(ps, "k-title-0001", ""); len(got) != 1 || got[0].Title != "Invoice roles" {
 		t.Errorf("exact %+v", got)
+	}
+	if got := Lookup(ps, "v-titled-0001", ""); len(got) != 1 || got[0].Title != "Gateway auth refactor" {
+		t.Errorf("vibe exact %+v", got)
 	}
 	if got := Lookup(ps, "c-prompt", ""); len(got) != 1 || got[0].ID != "c-prompt-0002" {
 		t.Errorf("prefix %+v", got)
@@ -171,6 +224,28 @@ func TestHolder(t *testing.T) {
 	}
 	if pid, _ := Holder(id, nil, []Proc{{PID: 6, Comm: "copilot", Argv: []string{"copilot", "--resume=" + id}}}); pid != 6 {
 		t.Errorf("--flag=id pid %d", pid)
+	}
+}
+
+// A vibe lease naming a dead pid leaves the session free; a live one holds it.
+func TestVibeHolder(t *testing.T) {
+	d := t.TempDir()
+	os.MkdirAll(filepath.Join(d, "unified", "v-holder-001"), 0o755)
+	os.MkdirAll(filepath.Join(d, "active"), 0o755)
+	lease := func(pid int) {
+		os.WriteFile(filepath.Join(d, "active", "v-holder-001.lock.json"),
+			[]byte(`{"lease_version":1,"session_id":"v-holder-001","process_id":`+strconv.Itoa(pid)+`,"acquired_at":"2026-11-07T09:00:00Z"}`), 0o644)
+	}
+	s := Session{ID: "v-holder-001", Path: filepath.Join(d, "unified", "v-holder-001")}
+	lease(999999999)
+	vibeHolder(&s)
+	if s.InUse {
+		t.Error("dead lease marks in use")
+	}
+	lease(os.Getpid())
+	vibeHolder(&s)
+	if !s.InUse || s.PID != os.Getpid() {
+		t.Errorf("live lease %+v", s)
 	}
 }
 

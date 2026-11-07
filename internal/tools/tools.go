@@ -160,6 +160,7 @@ patterns = "agy"
 command = "vibe"
 mode_args = { auto = "--auto-approve", smart-approve = "--smart-approve", ask = "--agent ask" }
 resume = ["--resume", "{id}"]
+session_path = "~/.vibe/logs/session/unified/{id}"
 patterns = "vibe"
 
 [fake]
