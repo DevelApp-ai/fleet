@@ -21,16 +21,16 @@ No other agent CLI has these three agents or this trust file. Links to the doc p
 
 ## What works, and what does not
 
-Works today: spawn, the `vibe` status patterns, starting modes, trust-store pre-approval, resume arguments (stored for park/wake, which is planned), one worktree per agent, and `fleet snap` fixtures that keep the pane readable.
+Works today: spawn, the `vibe` status patterns, starting modes, trust-store pre-approval, sessions and adopt (`fleet sessions`, `fleet adopt`), resume arguments (stored for park/wake, which is planned), one worktree per agent, and `fleet snap` fixtures that keep the pane readable.
 
 | Capability | copilot | claude | vibe | Where it lives |
 |---|---|---|---|---|
-| `fleet sessions` and `fleet adopt` | yes | yes | no | `internal/sessions`, driven by the profile's `session_path` |
+| `fleet sessions` and `fleet adopt` | yes | yes | yes | `internal/sessions`, driven by the profile's `session_path` (ADR-62) |
 | `fleet spend` | credits | tokens | "no usage recorded" | `internal/spend` (ADR-46) |
 | agent mail through peer MCP tools | yes | yes | no | `peer_args` on the profile, `internal/mail` |
 | context sized by effort level | yes | yes | no | `context_args` (ADR-60) |
 
-The `vibe` profile has no `session_path`, and `internal/sessions` only lists stores a profile points at, so vibe sessions are invisible to adopt. DESIGN.md notes the vibe session store as "still to be confirmed", which also blocks the post-spawn session id lookup and later park/wake for vibe agents.
+The `vibe` profile points `session_path` at `~/.vibe/logs/session/unified/{id}` and `parse()` reads `meta.json` (ADR-62), so adopt works on sessions started outside fleet. The store follows `VIBE_HOME` and `[session_logging] save_dir`: if yours is elsewhere, override `session_path` in `~/.fleet/tools.toml`. Still open: the post-spawn session id lookup and later park/wake for vibe agents.
 
 ## Constraints every change keeps
 
@@ -52,11 +52,15 @@ Known already: sessions are saved by default, controlled by `[session_logging]` 
 
 Done when the `session_path` glob and the parser can be written from the findings alone.
 
+Done by source inspection (2026-11-07); the live-run confirmations stay on fleet#3: a real `meta.json`, the has_prompt rule against a live session, and a real anonymized fixture through `scripts/check-public.sh`.
+
 ### 2. Sessions and adopt
 
 Add `session_path` to the built-in `vibe` profile from the spike, then teach `parse()` in `internal/sessions` the store format, the same way the Copilot and Claude parsers work: id, title, dir, model, has_prompt, in use. The glob should respect `VIBE_HOME` when it is set. Also confirm the spawn flow records the agent's real vibe session id on the board after start.
 
 Done when `fleet sessions` lists vibe sessions (words-filtered, in use skipped) and `fleet adopt` resumes one as an agent, with copilot and claude output unchanged.
+
+Built (2026-11-07, fleet#9, ADR-62): `session_path = "~/.vibe/logs/session/unified/{id}"`, and `parse()` reads `meta.json` — id cross-checked against the folder, title, dir, branch, model, end time — with has_prompt as the presence of a `core_input` record in the newest `journal/*.jsonl` (the text is not extracted), and in use read from the store's `active/<id>.lock.json` lease. Copilot and claude output unchanged. Not done: the glob is a static path, so a custom `VIBE_HOME` or `save_dir` is a `session_path` override in `~/.fleet/tools.toml`, not automatic; and the post-spawn id lookup for a spawned vibe agent is unconfirmed.
 
 ### 3. Spend
 

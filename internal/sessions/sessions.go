@@ -1,6 +1,6 @@
 // Package sessions finds sessions in the tools' own stores (Copilot
-// session-state folders, Claude project transcripts) via the profiles'
-// session_path globs, so `fleet adopt` works with words instead of IDs.
+// session-state folders, Vibe session folders, Claude project transcripts) via
+// the profiles' session_path globs, so `fleet adopt` works with words.
 package sessions
 
 import (
@@ -187,14 +187,14 @@ func candidates(profiles map[string]tools.Profile, store string) []cand {
 	return out
 }
 
-// mtime of a transcript, or of a session folder's events/workspace file.
+// mtime of a transcript, or of a session folder's newest known file.
 func mtime(p string) time.Time {
 	st, err := os.Stat(p)
 	if err != nil {
 		return time.Time{}
 	}
 	if st.IsDir() {
-		for _, f := range []string{"events.jsonl", "workspace.yaml"} {
+		for _, f := range []string{"events.jsonl", "workspace.yaml", "meta.json"} {
 			if fs, err := os.Stat(filepath.Join(p, f)); err == nil {
 				return fs.ModTime()
 			}
@@ -207,13 +207,19 @@ func parse(c cand) Session {
 	s := Session{ID: c.id, Store: c.src.pattern, Path: c.path, Updated: c.mtime}
 	var prompt string
 	if st, err := os.Stat(c.path); err == nil && st.IsDir() {
-		prompt = parseCopilot(&s)
+		if _, err := os.Stat(filepath.Join(c.path, "meta.json")); err == nil {
+			s.HasPrompt = parseVibe(&s) // Vibe: presence only, the text stays in the journal
+		} else {
+			prompt = parseCopilot(&s)
+		}
 	} else {
 		prompt = parseClaude(&s)
 	}
-	s.HasPrompt = prompt != ""
-	if s.Title == "" {
-		s.Title = prompt
+	if prompt != "" {
+		s.HasPrompt = true
+		if s.Title == "" {
+			s.Title = prompt
+		}
 	}
 	s.Title = OneLine(s.Title, 200)
 	s.Profile = suggest(c.src.profiles, s.Model)
@@ -348,6 +354,106 @@ func parseClaude(s *Session) string {
 		s.Title = summary
 	}
 	return prompt
+}
+
+// parseVibe reads a Mistral Vibe session folder (meta.json, journal/*.jsonl) and
+// reports whether it holds a user turn. The prompt text itself is not extracted:
+// the journal is an internal format, so HasPrompt is presence, not content.
+func parseVibe(s *Session) bool {
+	b, err := os.ReadFile(filepath.Join(s.Path, "meta.json"))
+	if err != nil || len(b) > maxRead {
+		return false
+	}
+	var m struct {
+		SessionID   string `json:"session_id"`
+		Title       string `json:"title"`
+		StartTime   string `json:"start_time"`
+		EndTime     string `json:"end_time"`
+		GitBranch   string `json:"git_branch"`
+		Environment struct {
+			WorkingDirectory string `json:"working_directory"`
+		} `json:"environment"`
+		OriginDirectory string `json:"origin_directory"`
+		Config          struct {
+			ActiveModel string `json:"active_model"`
+			ModelName   string `json:"model_name"`
+		} `json:"config"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return false
+	}
+	if m.SessionID != "" && m.SessionID != s.ID {
+		return false // folder and meta disagree: not a session we can resume
+	}
+	s.Title = m.Title
+	s.Dir = m.Environment.WorkingDirectory
+	if s.Dir == "" {
+		s.Dir = m.OriginDirectory
+	}
+	s.Branch = m.GitBranch
+	s.Model = m.Config.ActiveModel
+	if s.Model == "" {
+		s.Model = m.Config.ModelName
+	}
+	if t := when(m.EndTime); !t.IsZero() {
+		s.Updated = t
+	} else if t := when(m.StartTime); !t.IsZero() {
+		s.Updated = t
+	}
+	vibeHolder(s)
+	return journalHasPrompt(filepath.Join(s.Path, "journal"))
+}
+
+// vibeHolder marks the session in use when the store's active lease names a
+// live pid: <save_dir>/active/<id>.lock.json, written next to the unified/
+// tree. The .lock flock file carries no pid, so only the json lease is read.
+func vibeHolder(s *Session) {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(s.Path)), "active", s.ID+".lock.json"))
+	if err != nil {
+		return
+	}
+	var l struct {
+		SessionID string `json:"session_id"`
+		ProcessID int    `json:"process_id"`
+	}
+	if json.Unmarshal(b, &l) != nil || (l.SessionID != "" && l.SessionID != s.ID) {
+		return
+	}
+	if l.ProcessID > 0 && alive(l.ProcessID) {
+		s.InUse, s.PID = true, l.ProcessID
+	}
+}
+
+// journalHasPrompt reports whether the newest journal file records a user
+// turn. Vibe writes one journal file per conversation chunk, in writing order,
+// so the newest file holds the latest turn and earlier ones are history.
+func journalHasPrompt(dir string) bool {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if len(files) == 0 {
+		return false
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return mtime(files[i]).After(mtime(files[j]))
+	})
+	found := false
+	lines(files[0], func(l string) bool {
+		if !strings.Contains(l, `"core_input"`) {
+			return true
+		}
+		var e struct{ Type string }
+		if json.Unmarshal([]byte(l), &e) == nil && e.Type == "core_input" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// when parses an RFC3339 timestamp; the zero time when missing or malformed.
+func when(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339, s)
+	return t
 }
 
 // userText is the text of a user message (string or [{type:text}]); empty for
