@@ -25,6 +25,7 @@ Each `[section]` is a profile. A section with a built-in name overrides only the
 | `env` | Environment for the agent, as an inline table. `$VAR` and `${VAR}` are expanded from fleet's environment. |
 | `launch_id` | Arguments that set a session ID at launch. fleet generates a UUID for `{id}` and stores it on the board. |
 | `resume` | Arguments that resume a session by `{id}` (for park/wake, planned) |
+| `session_path` | Where that tool keeps sessions, a glob with `{id}` and `~`, so `fleet sessions` and `fleet adopt` find them. Built-ins: Copilot `~/.copilot/session-state/{id}`, Claude `~/.claude/projects/*/{id}.jsonl`, vibe `~/.vibe/logs/session/unified/{id}` (ADR-62). The vibe store follows `VIBE_HOME` and `[session_logging] save_dir` in `~/.vibe/config.toml`; if yours is elsewhere, override `session_path`. Without it, that tool's sessions are not listed. |
 | `mode_args` | Starting modes, as an inline table of space-separated flags. Give every profile an `auto` key holding that tool's allow-all flag, or `mode = "auto"` in `config.toml` cannot reach it and your agents keep asking for permission (ADR-56). |
 | `context_args` | Extra arguments per effort level (`light`, `standard`, `pro`, and `leader` for a squad leader), as an inline table of space-separated flags. The built-in Copilot profiles use it to leave out built-in tools an agent at that level does not need (ADR-60). Setting it replaces the whole table, so `context_args = { light = "" }` turns it off for every level. |
 | `prompt_args` | Arguments that carry the first prompt, with `{prompt}`, so the tool submits it itself instead of fleet pasting it |
@@ -79,6 +80,7 @@ command = "vibe"
 args = ["--your-flag"]
 mode_args = { auto = "--auto-approve" }
 resume = ["--resume", "{id}"]
+session_path = "~/.vibe/logs/session/unified/{id}"
 patterns = "vibe"
 ```
 
