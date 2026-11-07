@@ -5,6 +5,7 @@ User-facing changes, newest first. `fleet changes` and `Alt-g` show this file; i
 To add an entry: one line under today's `## YYYY-MM-DD` heading (add the heading if it is missing), at the top of that day, in the same commit as the change. Say what the user can do now, not how it was built. End with the ADR or commit in brackets when there is one: `(ADR-27)`, `(66a2ece, ADR-27)`.
 
 ## 2026-11-07
+- Vibe agents join `fleet spend`: their tokens are read from the Vibe CLI's own session journal — input, output, cached and written, one journal chunk at a time — and count towards the fleet total next to Copilot credits and Claude tokens. A vibe agent with nothing recorded still shows "no usage recorded" (fleet#8, ADR-63)
 - Adopt your own vibe sessions: `fleet sessions` now lists sessions the Vibe CLI saved by itself — title, dir, branch and model from `~/.vibe/logs/session/unified/` — skips one that is already running, and `fleet adopt <words>` resumes one as an agent. Copilot and Claude sessions are unchanged (fleet#9, ADR-62)
 
 ## 2026-11-06
