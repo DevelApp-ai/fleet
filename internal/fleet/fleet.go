@@ -425,12 +425,8 @@ func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, secret, 
 		}
 		p.Env = env
 	}
-	if p.PeerProject != "" {
-		f.wirePeer(name, p, dir)
-	}
 	pane, err := f.T.Spawn(Session, WindowPrefix+name, dir, p.EnvList(), tools.ShellCommand(argv))
 	if err != nil {
-		f.unwirePeer(name, p, dir)
 		log.Error("spawn failed", "agent", name, "err", err)
 		return nil, err
 	}
@@ -461,7 +457,6 @@ func (f *Fleet) start(name, profile string, p tools.Profile, dir, goal, secret, 
 		return nil
 	}); err != nil {
 		f.T.KillPane(pane)
-		f.unwirePeer(name, p, dir)
 		log.Error("board write failed", "agent", name, "err", err)
 		return nil, err
 	}
@@ -603,7 +598,6 @@ func (f *Fleet) Close(name string) error {
 	logx.For("fleet").Info("closed", "agent", name)
 	f.forgetMail(name)
 	f.forgetHook(name)
-	f.forgetPeer(name)
 	if f.Teams != nil {
 		if err := f.Teams.DropAgent(name); err != nil {
 			logx.For("fleet").Warn("drop team membership", "agent", name, "err", err)

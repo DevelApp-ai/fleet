@@ -13,7 +13,6 @@ import (
 
 	"github.com/sturlabragason/fleet/internal/conf"
 	"github.com/sturlabragason/fleet/internal/logx"
-	"github.com/sturlabragason/fleet/internal/trust"
 )
 
 // Profile describes how to launch one tool variant.
@@ -51,11 +50,6 @@ type Profile struct {
 	// PeerArgs wire the agent-scoped fleet MCP server (DESIGN §6.6), with
 	// {peer_mcp} / {peer_mcp_claude}. Inserted straight after the command.
 	PeerArgs []string
-	// PeerProject is the tool's project-local config file, relative to the
-	// agent's working dir, that fleet merges its peer MCP server into at
-	// start and takes back out at close (ADR-64). For tools with no CLI
-	// flag for servers; empty = the mail CLI only.
-	PeerProject string
 	// HookArgs wire the tool's own status hooks to `fleet hook`, with
 	// {hooks} (ADR-49). They are per-agent settings passed on the command
 	// line, so the user's own settings file is never written to. Left out
@@ -167,8 +161,6 @@ command = "vibe"
 mode_args = { auto = "--auto-approve", smart-approve = "--smart-approve", ask = "--agent ask" }
 resume = ["--resume", "{id}"]
 session_path = "~/.vibe/logs/session/unified/{id}"
-peer_project = ".vibe/config.toml"
-context_args = { light = "--disabled-tools task", standard = "--disabled-tools task", pro = "", leader = "" }
 patterns = "vibe"
 
 [fake]
@@ -268,9 +260,6 @@ func apply(p *Profile, sec map[string]conf.Value) {
 	if v, ok := sec["peer_args"]; ok {
 		p.PeerArgs, _ = v.([]string)
 	}
-	if v, ok := sec["peer_project"]; ok {
-		p.PeerProject, _ = v.(string)
-	}
 	if v, ok := sec["hook_args"]; ok {
 		p.HookArgs, _ = v.([]string)
 	}
@@ -339,24 +328,6 @@ func PeerMCP(exe, name string) (copilot, claude string) {
 	cl, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"fleet-peer": map[string]any{
 		"type": "stdio", "command": exe, "args": args}}})
 	return string(cp), string(cl)
-}
-
-// PeerMCPName is the peer server's name for agent name: one per agent, so
-// two agents sharing a checkout (spawn --no-worktree) each keep their own
-// server (ADR-64).
-func PeerMCPName(name string) string { return "fleet-peer-" + name }
-
-// PeerMCPVibe is the vibe variant of PeerMCP: the same one-server config
-// as a [[mcp_servers]] table for the project config file vibe reads
-// (ADR-64). Vibe has no CLI flag for servers, so the table is merged into
-// the file at start (internal/peerfile) and taken out at close.
-func PeerMCPVibe(exe, name string) string {
-	args := "\"mcp\", \"--agent\", " + trust.TomlQuote(name)
-	return "[[mcp_servers]]\n" +
-		"name = " + trust.TomlQuote(PeerMCPName(name)) + "\n" +
-		"transport = \"stdio\"\n" +
-		"command = " + trust.TomlQuote(exe) + "\n" +
-		"args = [" + args + "]\n"
 }
 
 // AgentVars are the Vars for launching agent name: fleet exe, id, peer MCP
