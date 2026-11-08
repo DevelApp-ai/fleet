@@ -9,7 +9,6 @@ To add an entry: one line under today's `## YYYY-MM-DD` heading (add the heading
 - Vibe agents get their fleetmate inbox as real MCP tools: starting one now writes a `fleet-peer-<agent>` server into the project's `.vibe/config.toml` and takes it back out on close, leaving a user's own servers and comments untouched. When the file cannot be written the agent starts anyway and falls back to `fleet mail` (fleet#10, ADR-64)
 
 ## 2026-11-07
-- Vibe agents get their fleetmate inbox as real MCP tools: starting one now writes a `fleet-peer-<agent>` server into the project's `.vibe/config.toml` and takes it back out on close, leaving a user's own servers and comments untouched. When the file cannot be written the agent starts anyway and falls back to `fleet mail` (fleet#10, ADR-64)
 - Vibe agents join `fleet spend`: their tokens are read from the Vibe CLI's own session journal — input, output, cached and written, one journal chunk at a time — and count towards the fleet total next to Copilot credits and Claude tokens. A vibe agent with nothing recorded still shows "no usage recorded" (fleet#8, ADR-63)
 - Adopt your own vibe sessions: `fleet sessions` now lists sessions the Vibe CLI saved by itself — title, dir, branch and model from `~/.vibe/logs/session/unified/` — skips one that is already running, and `fleet adopt <words>` resumes one as an agent. Copilot and Claude sessions are unchanged (fleet#9, ADR-62)
 
