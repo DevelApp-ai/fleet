@@ -129,14 +129,14 @@ func tomlStrings(key string, l []string) string {
 	var b strings.Builder
 	b.WriteString(key + " = [\n")
 	for _, v := range l {
-		fmt.Fprintf(&b, "    %s,\n", TomlQuote(v))
+		fmt.Fprintf(&b, "    %s,\n", tomlQuote(v))
 	}
 	b.WriteString("]\n")
 	return b.String()
 }
 
-// TomlQuote renders a TOML basic string.
-func TomlQuote(s string) string {
+// tomlQuote renders a TOML basic string.
+func tomlQuote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`, "\r", `\r`)
 	return `"` + r.Replace(s) + `"`
 }
