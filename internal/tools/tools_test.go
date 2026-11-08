@@ -364,6 +364,36 @@ func TestPeerArgs(t *testing.T) {
 	}
 }
 
+// TestPeerProject: vibe gets its MCP wiring as a project config file, the
+// others have none (ADR-64).
+func TestPeerProject(t *testing.T) {
+	ps, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps["vibe"].PeerProject != ".vibe/config.toml" {
+		t.Errorf("vibe peer_project = %q; want .vibe/config.toml", ps["vibe"].PeerProject)
+	}
+	for _, prof := range []string{"agy", "copilot", "claude", "fake"} {
+		if ps[prof].PeerProject != "" {
+			t.Errorf("%s peer_project = %q; want none", prof, ps[prof].PeerProject)
+		}
+	}
+}
+
+// TestPeerMCPVibe pins the [[mcp_servers]] table fleet merges into vibe's
+// project config (ADR-64): one server per agent, stdio, fleet mcp.
+func TestPeerMCPVibe(t *testing.T) {
+	want := "[[mcp_servers]]\nname = \"fleet-peer-a1\"\ntransport = \"stdio\"\n" +
+		"command = \"/bin/fleet\"\nargs = [\"mcp\", \"--agent\", \"a1\"]\n"
+	if got := PeerMCPVibe("/bin/fleet", "a1"); got != want {
+		t.Fatalf("PeerMCPVibe = %q; want %q", got, want)
+	}
+	if got := PeerMCPName("a1"); got != "fleet-peer-a1" {
+		t.Errorf("PeerMCPName = %q", got)
+	}
+}
+
 func TestSubagentLogPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
