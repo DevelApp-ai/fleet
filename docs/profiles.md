@@ -29,6 +29,7 @@ Each `[section]` is a profile. A section with a built-in name overrides only the
 | `mode_args` | Starting modes, as an inline table of space-separated flags. Give every profile an `auto` key holding that tool's allow-all flag, or `mode = "auto"` in `config.toml` cannot reach it and your agents keep asking for permission (ADR-56). |
 | `context_args` | Extra arguments per effort level (`light`, `standard`, `pro`, and `leader` for a squad leader), as an inline table of space-separated flags. The built-in Copilot profiles use it to leave out built-in tools an agent at that level does not need (ADR-60). Setting it replaces the whole table, so `context_args = { light = "" }` turns it off for every level. |
 | `prompt_args` | Arguments that carry the first prompt, with `{prompt}`, so the tool submits it itself instead of fleet pasting it |
+| `peer_project` | The tool's project config file, relative to the agent's dir, that fleet merges its peer MCP server into at start and takes back out at close. Built-in: vibe `.vibe/config.toml` (ADR-64). The merge is a text edit; a user's own servers and comments stay byte-for-byte, and a dir that cannot be written is skipped, leaving the agent the `fleet mail` CLI. |
 | `patterns` | Status pattern set: `copilot`, `claude`, `agy`, `vibe`, `fake` or your own. Defaults to the profile name. |
 
 Placeholders in `command` and `args`: `{fleet}` is the fleet binary, `{name}` the agent name, `{id}` the session ID.
@@ -81,6 +82,7 @@ args = ["--your-flag"]
 mode_args = { auto = "--auto-approve" }
 resume = ["--resume", "{id}"]
 session_path = "~/.vibe/logs/session/unified/{id}"
+peer_project = ".vibe/config.toml"
 patterns = "vibe"
 ```
 

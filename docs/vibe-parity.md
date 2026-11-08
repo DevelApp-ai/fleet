@@ -1,6 +1,6 @@
 # Vibe parity
 
-What works for a `vibe` agent today, what does not, and the plan for closing the four gaps: sessions, spend, agent mail and context sizing. After reading you can pick up any workstream knowing the constraints it must keep, and check the evidence that the built-in `vibe` profile is Mistral's Vibe CLI.
+What works for a `vibe` agent today, what does not, and the plan for the remaining gap: context sizing. Sessions, spend and agent mail are built. After reading you can pick up any workstream knowing the constraints it must keep, and check the evidence that the built-in `vibe` profile is Mistral's Vibe CLI.
 
 Checked 2026-11-07 against `main` at 739ed7c and the Vibe CLI docs at docs.mistral.ai/vibe/code. Everything here is built unless marked planned.
 
@@ -21,13 +21,13 @@ No other agent CLI has these three agents or this trust file. Links to the doc p
 
 ## What works, and what does not
 
-Works today: spawn, the `vibe` status patterns, starting modes, trust-store pre-approval, sessions and adopt (`fleet sessions`, `fleet adopt`), spend (`fleet spend`), resume arguments (stored for park/wake, which is planned), one worktree per agent, and `fleet snap` fixtures that keep the pane readable.
+Works today: spawn, the `vibe` status patterns, starting modes, trust-store pre-approval, sessions and adopt (`fleet sessions`, `fleet adopt`), spend (`fleet spend`), agent mail through peer MCP tools, resume arguments (stored for park/wake, which is planned), one worktree per agent, and `fleet snap` fixtures that keep the pane readable.
 
 | Capability | copilot | claude | vibe | Where it lives |
 |---|---|---|---|---|
 | `fleet sessions` and `fleet adopt` | yes | yes | yes | `internal/sessions`, driven by the profile's `session_path` (ADR-62) |
 | `fleet spend` | credits | tokens | tokens | `internal/spend` (ADR-46, ADR-63) |
-| agent mail through peer MCP tools | yes | yes | no | `peer_args` on the profile, `internal/mail` |
+| agent mail through peer MCP tools | yes | yes | yes | `peer_args` on the profile, `peer_project` for vibe, `internal/mail`, `internal/peerfile` (ADR-64) |
 | context sized by effort level | yes | yes | no | `context_args` (ADR-60) |
 
 The `vibe` profile points `session_path` at `~/.vibe/logs/session/unified/{id}` and `parse()` reads `meta.json` (ADR-62), so adopt works on sessions started outside fleet. The store follows `VIBE_HOME` and `[session_logging] save_dir`: if yours is elsewhere, override `session_path` in `~/.fleet/tools.toml`. Still open: the post-spawn session id lookup and later park/wake for vibe agents.
@@ -75,6 +75,8 @@ Built (2026-11-07, fleet#8, ADR-63): a `vibe` reader in `internal/spend` keyed b
 Claude agents get the agent-scoped fleet MCP server through `peer_args = ["--mcp-config", "{peer_mcp_claude}"]` (DESIGN.md §6.6). The Vibe CLI configures MCP servers in `config.toml` (`[[mcp_servers]]`, stdio or http), not on the command line, so the mechanism needs its own spike: a flag for one session, or a config written per agent at spawn under the same lock-and-rename discipline as the trust store. A per-agent config must not disturb the user's credentials, and the user's own config file is never written. Access control does not change: free inside a team or repo, one agent asks otherwise.
 
 Done when two vibe agents in one team exchange mail through peer MCP tools and a cross-team message still asks.
+
+Built (2026-11-07, fleet#10, ADR-64): no flag exists, so the profile's `peer_project = ".vibe/config.toml"` names the project config file, and every start (spawn, adopt, wake) merges one `[[mcp_servers]]` table into it: `fleet-peer-<agent>`, stdio, `{fleet} mcp --agent <agent>`. One server per agent, so two `--no-worktree` agents in one checkout keep their own bindings. The merge is a text edit under the trust store's lock-and-rename discipline (`internal/peerfile`): the user's own servers and comments stay byte-for-byte, and close takes the table back out, deleting the file only when fleet wrote it. A dir that cannot be written is logged and skipped; the agent starts and uses `fleet mail`. The user's own `~/.vibe/config.toml` is never written. Still open: a live two-agent exchange, riding with the #3 live-run items.
 
 ### 5. Context sized by effort
 
