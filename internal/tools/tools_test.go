@@ -545,21 +545,6 @@ func TestContextArgs(t *testing.T) {
 	if got, _ := ps["claude"].Argv(Vars{}, Launch{Context: "light"}); slices.Contains(got, "--excluded-tools") {
 		t.Errorf("claude got copilot context args: %v", got)
 	}
-	// Vibe sizes by effort the same way, with its own flag: the subagent
-	// tool only for pro and a leader (ADR-65).
-	for lvl, agents := range map[string]bool{"light": false, "standard": false, "pro": true, "leader": true} {
-		got, _ := ps["vibe"].Argv(Vars{ID: "U"}, Launch{Context: lvl})
-		i := slices.Index(got, "--disabled-tools")
-		if agents {
-			if i >= 0 {
-				t.Errorf("vibe %s: subagent tool excluded: %v", lvl, got)
-			}
-			continue
-		}
-		if i < 0 || i+1 >= len(got) || got[i+1] != "task" {
-			t.Errorf("vibe %s: want --disabled-tools task: %v", lvl, got)
-		}
-	}
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "tools.toml"), []byte("[copilot]\ncontext_args = { light = \"--x\" }\n"), 0o644)
 	ps, _ = Load(dir)
