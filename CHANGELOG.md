@@ -4,10 +4,6 @@ User-facing changes, newest first. `fleet changes` and `Alt-g` show this file; i
 
 To add an entry: one line under today's `## YYYY-MM-DD` heading (add the heading if it is missing), at the top of that day, in the same commit as the change. Say what the user can do now, not how it was built. End with the ADR or commit in brackets when there is one: `(ADR-27)`, `(66a2ece, ADR-27)`.
 
-## 2026-11-08
-- A vibe agent's effort level now sizes its tools, as for Copilot: light and standard start without the subagent tool, pro and a squad leader keep everything. Override `context_args` in `~/.fleet/tools.toml` as usual (fleet#5, ADR-65)
-- Vibe agents get their fleetmate inbox as real MCP tools: starting one now writes a `fleet-peer-<agent>` server into the project's `.vibe/config.toml` and takes it back out on close, leaving a user's own servers and comments untouched. When the file cannot be written the agent starts anyway and falls back to `fleet mail` (fleet#10, ADR-64)
-
 ## 2026-11-07
 - Vibe agents get their fleetmate inbox as real MCP tools: starting one now writes a `fleet-peer-<agent>` server into the project's `.vibe/config.toml` and takes it back out on close, leaving a user's own servers and comments untouched. When the file cannot be written the agent starts anyway and falls back to `fleet mail` (fleet#10, ADR-64)
 - Vibe agents join `fleet spend`: their tokens are read from the Vibe CLI's own session journal — input, output, cached and written, one journal chunk at a time — and count towards the fleet total next to Copilot credits and Claude tokens. A vibe agent with nothing recorded still shows "no usage recorded" (fleet#8, ADR-63)
