@@ -35,8 +35,19 @@ func lockPath(path string) (string, error) {
 }
 
 // editor rewrites the current contents of a trust store. changed=false
-// leaves the file untouched.
+// leaves the file untouched; nil data with changed=true deletes it.
 type editor func(old []byte) (data []byte, changed bool, err error)
+
+// EditFile rewrites a file that is not a trust store under the same
+// lock-and-rename discipline, creating a missing parent directory first:
+// a project config fleet adds a server to may not exist yet, unlike a
+// store the tool itself must have written (ADR-64).
+func EditFile(path string, fn editor) (bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	return edit(path, fn)
+}
 
 // edit applies fn to path under a lock and replaces the file atomically:
 // the bytes fn sees are the bytes on disk at that moment, so a concurrent
@@ -66,6 +77,9 @@ func edit(path string, fn editor) (bool, error) {
 	data, changed, err := fn(old)
 	if err != nil || !changed {
 		return false, err
+	}
+	if data == nil { // the caller asked for the file to go (ADR-64)
+		return true, os.Remove(path)
 	}
 	return true, replace(path, data, mode)
 }
