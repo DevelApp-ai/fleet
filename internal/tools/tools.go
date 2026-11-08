@@ -168,6 +168,7 @@ mode_args = { auto = "--auto-approve", smart-approve = "--smart-approve", ask = 
 resume = ["--resume", "{id}"]
 session_path = "~/.vibe/logs/session/unified/{id}"
 peer_project = ".vibe/config.toml"
+context_args = { light = "--disabled-tools task", standard = "--disabled-tools task", pro = "", leader = "" }
 patterns = "vibe"
 
 [fake]
