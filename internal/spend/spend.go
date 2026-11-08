@@ -131,7 +131,6 @@ type Kind string
 const (
 	Copilot Kind = "copilot"
 	Claude  Kind = "claude"
-	Vibe    Kind = "vibe"
 )
 
 func parserFor(k Kind) (parser, bool) {
@@ -140,8 +139,6 @@ func parserFor(k Kind) (parser, bool) {
 		return parser{tags: [][]byte{[]byte(`"session.usage_record"`)}, line: copilotLine}, true
 	case Claude:
 		return parser{tags: [][]byte{[]byte(`"output_tokens"`), []byte(`"cost-state"`)}, line: claudeLine}, true
-	case Vibe:
-		return parser{tags: [][]byte{[]byte(`"completion_succeeded"`)}, line: vibeLine}, true
 	}
 	return parser{}, false
 }
@@ -232,42 +229,6 @@ func claudeLine(b []byte) (record, bool) {
 		}, id: ev.Message.ID}, true
 	}
 	return record{}, false
-}
-
-// vibeLine reads one Mistral Vibe journal record: a completion_succeeded event
-// carrying the reply's usage. The journal is an internal format pinned by the
-// fixture, so a line that does not match is skipped, not guessed at (ADR-63).
-// usage.total_tokens = input_tokens + output_tokens, so the cached and written
-// tokens live inside input_tokens; each token is kept in one field, as for
-// Copilot. A reply recorded before usage was required backfills as zero: a real
-// call, counted, with no tokens. The records carry no model name.
-func vibeLine(b []byte) (record, bool) {
-	var ev struct {
-		Type     string `json:"type"`
-		ActionID string `json:"action_id"`
-		Result   struct {
-			Usage struct {
-				InputTokens       int64 `json:"input_tokens"`
-				OutputTokens      int64 `json:"output_tokens"`
-				TotalTokens       int64 `json:"total_tokens"`
-				CachedInputTokens int64 `json:"cached_input_tokens"`
-				CacheWriteTokens  int64 `json:"cache_write_tokens"`
-				ReasoningTokens   int64 `json:"reasoning_tokens"`
-			} `json:"usage"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(b, &ev) != nil || ev.Type != "completion_succeeded" {
-		return record{}, false
-	}
-	u := ev.Result.Usage
-	fresh := u.InputTokens - u.CachedInputTokens - u.CacheWriteTokens
-	if fresh < 0 {
-		fresh = 0
-	}
-	return record{sp: Spend{
-		Calls: 1, Input: fresh, Output: u.OutputTokens,
-		CacheRead: u.CachedInputTokens, CacheWrite: u.CacheWriteTokens,
-	}, id: ev.ActionID}, true
 }
 
 // result is what one pass over a buffer found.

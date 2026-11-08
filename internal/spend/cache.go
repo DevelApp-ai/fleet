@@ -3,7 +3,6 @@ package spend
 import (
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -139,12 +138,8 @@ func skipPartial(f *os.File, off int64) int64 {
 
 // Agent returns the spend of one agent's session under its tool profile.
 // Profiles are mapped by their status pattern set, so copilot variants such
-// as claude-copilot need no extra configuration. A Vibe session's usage is
-// spread over its journal chunk files, so it is summed over all of them.
+// as claude-copilot need no extra configuration.
 func (c *Cache) Agent(p tools.Profile, sessionID string) (Spend, bool) {
-	if Kind(p.Patterns) == Vibe {
-		return c.vibeSession(p, sessionID)
-	}
 	path, k := Source(p, sessionID)
 	if path == "" {
 		return Spend{}, false
@@ -152,33 +147,8 @@ func (c *Cache) Agent(p tools.Profile, sessionID string) (Spend, bool) {
 	return c.File(path, k)
 }
 
-// vibeSession sums a Vibe session's journal files: the CLI writes one
-// <seq>.jsonl per conversation chunk under <session>/journal/, so a long
-// session spreads its usage over several append-only files. Each is read
-// through the same cache, so a quiet chunk costs one Stat; the newest file
-// keeps being read from where the last read stopped. A missing session or a
-// journal with nothing readable reports no usage, not an error.
-func (c *Cache) vibeSession(p tools.Profile, sessionID string) (Spend, bool) {
-	var out Spend
-	any := false
-	for _, dir := range p.SessionMatches(sessionID) {
-		files, _ := filepath.Glob(filepath.Join(dir, "journal", "*.jsonl"))
-		for _, f := range files {
-			if s, ok := c.File(f, Vibe); ok {
-				any = true
-				out.Add(s)
-			}
-		}
-	}
-	if !any {
-		return Spend{}, false
-	}
-	return out, true
-}
-
 // Source is the session file holding an agent's usage and its format
-// ("" when the profile records none). Vibe has no single session file, so
-// its usage is summed over the session's journal files in Agent instead.
+// ("" when the profile records none).
 func Source(p tools.Profile, sessionID string) (string, Kind) {
 	if sessionID == "" {
 		return "", ""
